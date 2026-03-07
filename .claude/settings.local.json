@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node --version:*)",
+      "Bash(npm:*)",
+      "Bash(powershell.exe -Command:*)",
+      "Bash(export PATH=\"/c/Program Files/nodejs:$PATH\")",
+      "Bash(taskkill:*)",
+      "Bash(curl:*)",
+      "Bash(venv/Scripts/python:*)",
+      "Bash(git status -u)",
+      "Bash(git rm -r --cached frontend/node_modules backend/app/__pycache__)",
+      "Bash(git add .gitignore backend/ frontend/ start-backend.bat start-frontend.bat .claude/)"
+    ]
+  }
+}
