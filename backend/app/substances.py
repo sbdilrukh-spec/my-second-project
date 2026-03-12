@@ -1,0 +1,88 @@
+# Справочник загрязняющих веществ и ПДК (ОНД-86 / ГН 2.1.6.3492-17)
+
+SUBSTANCES = [
+    {
+        "code": "0301",
+        "name": "Азота диоксид (NO2)",
+        "pdk_mr": 0.2,
+        "pdk_ss": 0.04,
+        "hazard_class": 3,
+    },
+    {
+        "code": "0304",
+        "name": "Азота оксид (NO)",
+        "pdk_mr": 0.4,
+        "pdk_ss": 0.06,
+        "hazard_class": 3,
+    },
+    {
+        "code": "0330",
+        "name": "Серы диоксид (SO2)",
+        "pdk_mr": 0.5,
+        "pdk_ss": 0.05,
+        "hazard_class": 3,
+    },
+    {
+        "code": "0337",
+        "name": "Углерода оксид (CO)",
+        "pdk_mr": 5.0,
+        "pdk_ss": 3.0,
+        "hazard_class": 4,
+    },
+    {
+        "code": "2902",
+        "name": "Пыль неорганическая (до 20% SiO2)",
+        "pdk_mr": 0.5,
+        "pdk_ss": 0.15,
+        "hazard_class": 3,
+    },
+    {
+        "code": "2908",
+        "name": "Пыль неорганическая (20–70% SiO2)",
+        "pdk_mr": 0.3,
+        "pdk_ss": 0.1,
+        "hazard_class": 3,
+    },
+    {
+        "code": "0328",
+        "name": "Сажа (углерод чёрный)",
+        "pdk_mr": 0.15,
+        "pdk_ss": 0.05,
+        "hazard_class": 3,
+    },
+    {
+        "code": "1325",
+        "name": "Формальдегид",
+        "pdk_mr": 0.05,
+        "pdk_ss": 0.01,
+        "hazard_class": 2,
+    },
+    {
+        "code": "0703",
+        "name": "Бенз(а)пирен",
+        "pdk_mr": None,
+        "pdk_ss": 0.000001,
+        "hazard_class": 1,
+    },
+    {
+        "code": "1042",
+        "name": "Аммиак",
+        "pdk_mr": 0.2,
+        "pdk_ss": 0.04,
+        "hazard_class": 4,
+    },
+    {
+        "code": "1071",
+        "name": "Фтористый водород",
+        "pdk_mr": 0.02,
+        "pdk_ss": 0.005,
+        "hazard_class": 2,
+    },
+    {
+        "code": "0410",
+        "name": "Метан",
+        "pdk_mr": 50.0,
+        "pdk_ss": None,
+        "hazard_class": None,
+    },
+]

@@ -1,0 +1,146 @@
+"""
+Импорт источников из CSV и Excel файлов.
+"""
+
+import csv
+import io
+from typing import List, Dict, Any
+
+# Маппинг допустимых названий столбцов к каноническим
+COLUMN_MAP = {
+    # Название
+    "название": "name", "name": "name", "источник": "name", "source": "name",
+    # Высота
+    "высота": "height", "h": "height", "h, м": "height", "height": "height",
+    "высота трубы": "height", "высота, м": "height",
+    # Диаметр
+    "диаметр": "diameter", "d": "diameter", "d, м": "diameter", "diameter": "diameter",
+    "диаметр устья": "diameter",
+    # Скорость
+    "скорость": "velocity", "w0": "velocity", "w0, м/с": "velocity", "velocity": "velocity",
+    "скорость выхода": "velocity",
+    # Температура
+    "температура": "temperature", "tг": "temperature", "tг, °c": "temperature",
+    "temperature": "temperature", "температура газов": "temperature",
+    # Выброс г/с
+    "выброс г/с": "emission_gs", "m": "emission_gs", "m, г/с": "emission_gs",
+    "emission_gs": "emission_gs", "г/с": "emission_gs", "выброс": "emission_gs",
+    # Выброс т/год
+    "выброс т/год": "emission_ty", "m год": "emission_ty", "m, т/год": "emission_ty",
+    "emission_ty": "emission_ty", "т/год": "emission_ty",
+    # Координаты
+    "широта": "lat", "lat": "lat", "latitude": "lat",
+    "долгота": "lon", "lon": "lon", "longitude": "lon", "lng": "lon",
+}
+
+REQUIRED_FIELDS = {"name", "height", "diameter", "velocity", "temperature", "emission_gs"}
+
+
+def _normalize_header(header: str) -> str:
+    """Приводит заголовок к каноническому имени."""
+    h = header.strip().lower().replace("°", "°")
+    return COLUMN_MAP.get(h, h)
+
+
+def parse_csv(content: str) -> List[Dict[str, Any]]:
+    """Парсит CSV-текст и возвращает список источников."""
+    # Определяем разделитель
+    delimiter = ";"
+    if content.count(",") > content.count(";"):
+        delimiter = ","
+
+    reader = csv.reader(io.StringIO(content), delimiter=delimiter)
+    rows = list(reader)
+
+    if len(rows) < 2:
+        return []
+
+    headers = [_normalize_header(h) for h in rows[0]]
+    sources = []
+
+    for row_idx, row in enumerate(rows[1:], start=2):
+        if len(row) < len(headers):
+            row += [""] * (len(headers) - len(row))
+
+        source = {}
+        errors = []
+
+        for i, header in enumerate(headers):
+            val = row[i].strip() if i < len(row) else ""
+
+            if header in ("name",):
+                source[header] = val or f"Источник {row_idx - 1}"
+            elif header in ("height", "diameter", "velocity", "temperature",
+                           "emission_gs", "emission_ty", "lat", "lon"):
+                try:
+                    source[header] = float(val.replace(",", ".")) if val else None
+                except ValueError:
+                    source[header] = None
+                    errors.append(f"Строка {row_idx}, '{headers[i]}': нечисловое значение '{val}'")
+
+        # Проверка обязательных полей
+        for field in REQUIRED_FIELDS:
+            if field not in source or source[field] is None:
+                if field == "name":
+                    source["name"] = f"Источник {row_idx - 1}"
+                else:
+                    errors.append(f"Строка {row_idx}: отсутствует обязательное поле '{field}'")
+
+        source["_row"] = row_idx
+        source["_errors"] = errors
+        sources.append(source)
+
+    return sources
+
+
+def parse_excel(file_bytes: bytes) -> List[Dict[str, Any]]:
+    """Парсит Excel (.xlsx) файл и возвращает список источников."""
+    import openpyxl
+
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True)
+    ws = wb.active
+
+    rows = list(ws.iter_rows(values_only=True))
+    if len(rows) < 2:
+        return []
+
+    headers = [_normalize_header(str(h or "")) for h in rows[0]]
+    sources = []
+
+    for row_idx, row in enumerate(rows[1:], start=2):
+        source = {}
+        errors = []
+
+        for i, header in enumerate(headers):
+            val = row[i] if i < len(row) else None
+
+            if header in ("name",):
+                source[header] = str(val) if val else f"Источник {row_idx - 1}"
+            elif header in ("height", "diameter", "velocity", "temperature",
+                           "emission_gs", "emission_ty", "lat", "lon"):
+                try:
+                    source[header] = float(val) if val is not None else None
+                except (ValueError, TypeError):
+                    source[header] = None
+                    errors.append(f"Строка {row_idx}, '{headers[i]}': нечисловое значение")
+
+        for field in REQUIRED_FIELDS:
+            if field not in source or source[field] is None:
+                if field == "name":
+                    source["name"] = f"Источник {row_idx - 1}"
+                else:
+                    errors.append(f"Строка {row_idx}: отсутствует обязательное поле '{field}'")
+
+        source["_row"] = row_idx
+        source["_errors"] = errors
+        sources.append(source)
+
+    wb.close()
+    return sources
+
+
+def generate_template_csv() -> str:
+    """Генерирует CSV-шаблон для импорта."""
+    header = "Название;Высота (H), м;Диаметр (D), м;Скорость (w0), м/с;Температура (Tг), °C;Выброс (M), г/с;Выброс, т/год;Широта;Долгота"
+    example = "Труба ТЭЦ-1;45;1.2;12.0;180;8.5;268.06;41.2995;69.2401"
+    return f"{header}\n{example}\n"

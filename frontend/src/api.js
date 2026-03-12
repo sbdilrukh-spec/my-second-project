@@ -7,8 +7,23 @@ export async function fetchCities() {
   return res.data;
 }
 
+export async function fetchSubstances() {
+  const res = await axios.get(`${BASE}/substances`);
+  return res.data;
+}
+
+export async function fetchWeather(lat, lon) {
+  const res = await axios.get(`${BASE}/weather`, { params: { lat, lon } });
+  return res.data;
+}
+
 export async function calculate(payload) {
   const res = await axios.post(`${BASE}/calculate`, payload);
+  return res.data;
+}
+
+export async function fetchTables(payload) {
+  const res = await axios.post(`${BASE}/tables`, payload);
   return res.data;
 }
 

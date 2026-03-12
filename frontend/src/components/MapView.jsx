@@ -5,6 +5,7 @@ import {
   ImageOverlay,
   Marker,
   Popup,
+  Polygon,
   useMapEvents,
   useMap,
 } from "react-leaflet";
@@ -391,6 +392,27 @@ export default function MapView({
               : "✓ ПДК не превышена"}
           </Popup>
         </Marker>
+      )}
+
+      {/* Граница СЗЗ */}
+      {result?.szz?.boundary?.length > 2 && (
+        <Polygon
+          positions={result.szz.boundary.map((p) => [p.lat, p.lon])}
+          pathOptions={{
+            color: "#DC2626",
+            weight: 2,
+            fillColor: "#DC2626",
+            fillOpacity: 0.08,
+            dashArray: "6,4",
+          }}
+        >
+          <Popup>
+            <b>Граница СЗЗ</b><br />
+            Макс. расстояние: {result.szz.max_distance_m} м<br />
+            Мин. расстояние: {result.szz.min_distance_m} м<br />
+            Площадь превышения: {result.szz.area_ha} га
+          </Popup>
+        </Polygon>
       )}
 
       {/* Кнопки переключения */}

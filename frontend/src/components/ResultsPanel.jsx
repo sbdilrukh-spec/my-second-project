@@ -73,6 +73,27 @@ export default function ResultsPanel({ result, onExportPdf, exporting, t }) {
         </div>
       )}
 
+      {/* СЗЗ */}
+      {result.szz && (
+        <div style={{ marginTop: 12, padding: 8, background: "#FEF2F2", borderRadius: 6, border: "1px solid #FECACA" }}>
+          <div style={{ fontWeight: 600, fontSize: 12, color: "#DC2626", marginBottom: 4 }}>
+            Граница СЗЗ
+          </div>
+          <div className="result-row">
+            <span className="result-label">Макс. расстояние</span>
+            <span className="result-value">{fmt(result.szz.max_distance_m, 0)} м</span>
+          </div>
+          <div className="result-row">
+            <span className="result-label">Мин. расстояние</span>
+            <span className="result-value">{fmt(result.szz.min_distance_m, 0)} м</span>
+          </div>
+          <div className="result-row">
+            <span className="result-label">Площадь превышения</span>
+            <span className="result-value">{fmt(result.szz.area_ha, 2)} га</span>
+          </div>
+        </div>
+      )}
+
       <button
         className="btn-primary"
         style={{ width: "100%", marginTop: 14 }}

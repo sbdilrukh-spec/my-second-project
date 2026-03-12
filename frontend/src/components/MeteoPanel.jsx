@@ -2,7 +2,7 @@ import React from "react";
 
 const STABILITY_CLASSES = ["A", "B", "C", "D", "E", "F"];
 
-export default function MeteoPanel({ meteo, cities, onChange, t }) {
+export default function MeteoPanel({ meteo, cities, onChange, onLoadWeather, weatherLoading, t }) {
   const set = (key, val) => onChange({ ...meteo, [key]: val });
 
   const stabilityLabel = (cls) => {
@@ -41,6 +41,28 @@ export default function MeteoPanel({ meteo, cities, onChange, t }) {
         </select>
       </div>
 
+      {/* Кнопка загрузки погоды */}
+      <button
+        className="btn-secondary btn-sm"
+        style={{ width: "100%", marginBottom: 8 }}
+        onClick={onLoadWeather}
+        disabled={weatherLoading}
+      >
+        {weatherLoading ? t.loadingWeather : t.loadWeather}
+      </button>
+
+      {/* Режим направления ветра */}
+      <div className="field-row">
+        <label>{t.windMode}</label>
+        <select
+          value={meteo.wind_mode || "360"}
+          onChange={(e) => set("wind_mode", e.target.value)}
+        >
+          <option value="360">{t.windMode360}</option>
+          <option value="single">{t.windModeSingle}</option>
+        </select>
+      </div>
+
       <div className="field-row">
         <label>{t.windSpeed}</label>
         <input
@@ -50,18 +72,20 @@ export default function MeteoPanel({ meteo, cities, onChange, t }) {
         />
       </div>
 
-      <div className="field-row">
-        <label>{t.windDirection}</label>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <input
-            type="number" step="1" min="0" max="360"
-            value={meteo.wind_direction}
-            onChange={(e) => set("wind_direction", parseFloat(e.target.value) || 0)}
-            style={{ flex: 1 }}
-          />
-          <span style={{ fontSize: 22 }}>{dirArrow(meteo.wind_direction)}</span>
+      {meteo.wind_mode === "single" && (
+        <div className="field-row">
+          <label>{t.windDirection}</label>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <input
+              type="number" step="1" min="0" max="360"
+              value={meteo.wind_direction}
+              onChange={(e) => set("wind_direction", parseFloat(e.target.value) || 0)}
+              style={{ flex: 1 }}
+            />
+            <span style={{ fontSize: 22 }}>{dirArrow(meteo.wind_direction)}</span>
+          </div>
         </div>
-      </div>
+      )}
 
       <div className="field-row">
         <label>{t.stabilityClass}</label>
@@ -89,7 +113,6 @@ export default function MeteoPanel({ meteo, cities, onChange, t }) {
 
 function dirArrow(deg) {
   const dirs = ["↓", "↙", "←", "↖", "↑", "↗", "→", "↘"];
-  // ветер ОТ направления deg → стрелка указывает КУДА дует
   const idx = Math.round(((deg + 180) % 360) / 45) % 8;
   return dirs[idx];
 }

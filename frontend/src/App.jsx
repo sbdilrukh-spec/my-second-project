@@ -1,8 +1,13 @@
-import React, { useState, useEffect, useCallback } from "react";
-import { fetchCities, calculate, exportPdf } from "./api.js";
+import React, { useState, useEffect, useCallback, useRef } from "react";
+import { fetchCities, fetchSubstances, fetchWeather, calculate, fetchTables, exportPdf } from "./api.js";
 import { translations } from "./i18n.js";
 import SourceForm, { createDefaultSource } from "./components/SourceForm.jsx";
 import MeteoPanel from "./components/MeteoPanel.jsx";
+import SubstancePanel from "./components/SubstancePanel.jsx";
+import EnterpriseCard, { DEFAULT_ENTERPRISE } from "./components/EnterpriseCard.jsx";
+import TablesPanel from "./components/TablesPanel.jsx";
+import ScenarioPanel from "./components/ScenarioPanel.jsx";
+import ImportPanel from "./components/ImportPanel.jsx";
 import MapView from "./components/MapView.jsx";
 import ResultsPanel from "./components/ResultsPanel.jsx";
 
@@ -12,6 +17,7 @@ const DEFAULT_METEO = {
   wind_direction: 270,
   stability_class: "D",
   temperature: 13.0,
+  wind_mode: "360",
 };
 
 const DEFAULT_GRID = {
@@ -23,44 +29,86 @@ export default function App() {
   const [lang, setLang] = useState("ru");
   const t = translations[lang];
 
+  // --- Восстановление из localStorage ---
+  const savedProject = (() => {
+    try { return JSON.parse(localStorage.getItem("ond86_autosave")); } catch { return null; }
+  })();
+
   const [cities, setCities] = useState([]);
-  const [meteo, setMeteo] = useState(DEFAULT_METEO);
-  const [grid, setGrid] = useState(DEFAULT_GRID);
-  const [pdk, setPdk] = useState(0.5);
-  const [sources, setSources] = useState([createDefaultSource(41.2995, 69.2401, 0)]);
+  const [substances, setSubstances] = useState([]);
+  const [meteo, setMeteo] = useState(savedProject?.meteo || DEFAULT_METEO);
+  const [grid, setGrid] = useState(savedProject?.grid || DEFAULT_GRID);
+  const [pdk, setPdk] = useState(savedProject?.pdk ?? 0.5);
+  const [selectedSubstance, setSelectedSubstance] = useState(savedProject?.selectedSubstance || null);
+  const [sources, setSources] = useState(savedProject?.sources || [createDefaultSource(41.2995, 69.2401, 0)]);
+  const [enterprise, setEnterprise] = useState(savedProject?.enterprise || DEFAULT_ENTERPRISE);
 
   const [result, setResult] = useState(null);
+  const [tables, setTables] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [tablesLoading, setTablesLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState(null);
-  const [viewMode, setViewMode] = useState("heatmap"); // "heatmap" | "grid"
+  const [viewMode, setViewMode] = useState("heatmap");
 
-  // Индекс источника, для которого ждём клик на карте
   const [pickingIndex, setPickingIndex] = useState(null);
 
-  // Загрузка городов
+  // --- Сценарии (до/после) ---
+  const [scenarioMode, setScenarioMode] = useState(false);
+  const [baselineResult, setBaselineResult] = useState(null);
+
+  // --- Автосохранение каждые 30 секунд ---
+  const autosaveRef = useRef();
+  autosaveRef.current = { sources, meteo, grid, pdk, selectedSubstance, enterprise };
+
+  useEffect(() => {
+    const save = () => {
+      localStorage.setItem("ond86_autosave", JSON.stringify(autosaveRef.current));
+    };
+    const interval = setInterval(save, 30000);
+    window.addEventListener("beforeunload", save);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener("beforeunload", save);
+      save();
+    };
+  }, []);
+
+  // Загрузка городов и веществ
   useEffect(() => {
     fetchCities()
       .then(setCities)
       .catch(() => {
-        // Если бэкенд недоступен — fallback список
         setCities([
           { name: "Ташкент", lat: 41.2995, lon: 69.2401, A: 200, T_avg: 13.1 },
           { name: "Навои", lat: 40.0839, lon: 65.3792, A: 220, T_avg: 14.0 },
           { name: "Самарканд", lat: 39.649, lon: 66.975, A: 200, T_avg: 12.7 },
-          { name: "Бухара", lat: 39.7747, lon: 64.4286, A: 220, T_avg: 14.2 },
-          { name: "Фергана", lat: 40.3834, lon: 71.7864, A: 160, T_avg: 12.5 },
         ]);
       });
+    fetchSubstances()
+      .then(setSubstances)
+      .catch(() => {});
   }, []);
 
-  // Центр карты — по выбранному городу
+  // Загрузка пользовательских веществ из localStorage
+  const [customSubstances, setCustomSubstances] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem("customSubstances") || "[]");
+    } catch { return []; }
+  });
+
+  useEffect(() => {
+    localStorage.setItem("customSubstances", JSON.stringify(customSubstances));
+  }, [customSubstances]);
+
+  const allSubstances = [...substances, ...customSubstances];
+
+  // Центр карты
   const cityCenter = (() => {
     const city = cities.find((c) => c.name === meteo.city);
     return city ? [city.lat, city.lon] : null;
   })();
 
-  // При смене города — обновить позиции источников к центру города
   useEffect(() => {
     const city = cities.find((c) => c.name === meteo.city);
     if (!city) return;
@@ -71,7 +119,6 @@ export default function App() {
     );
   }, [meteo.city, cities]);
 
-  // --- Изменение поля источника ---
   const handleSourceChange = useCallback((index, key, value) => {
     setSources((prev) =>
       prev.map((src, i) => (i === index ? { ...src, [key]: value } : src))
@@ -90,7 +137,6 @@ export default function App() {
     setSources((prev) => prev.filter((_, i) => i !== index));
   };
 
-  // --- Клик на карте для позиционирования источника ---
   const handlePickFromMap = (index) => {
     setPickingIndex(pickingIndex === index ? null : index);
   };
@@ -106,23 +152,109 @@ export default function App() {
     handleSourceChange(index, "lon", lon);
   };
 
-  // --- Расчёт ---
+  // Выбор вещества из справочника
+  const handleSubstanceSelect = (substance) => {
+    setSelectedSubstance(substance);
+    if (substance && substance.pdk_mr != null) {
+      setPdk(substance.pdk_mr);
+    }
+  };
+
+  // Добавление пользовательского вещества
+  const handleAddCustomSubstance = (substance) => {
+    setCustomSubstances((prev) => [...prev, substance]);
+  };
+
+  // Загрузка погоды
+  const [weatherLoading, setWeatherLoading] = useState(false);
+  const handleLoadWeather = async () => {
+    const city = cities.find((c) => c.name === meteo.city);
+    if (!city) return;
+    setWeatherLoading(true);
+    try {
+      const data = await fetchWeather(city.lat, city.lon);
+      setMeteo((prev) => ({
+        ...prev,
+        temperature: data.temperature ?? prev.temperature,
+        wind_speed: data.wind_speed ?? prev.wind_speed,
+        wind_direction: data.wind_direction ?? prev.wind_direction,
+        stability_class: data.stability_class ?? prev.stability_class,
+      }));
+    } catch {
+      setError(t.weatherError);
+    } finally {
+      setWeatherLoading(false);
+    }
+  };
+
+  // Сохранение проекта в JSON
+  const handleSaveProject = () => {
+    const project = { sources, meteo, grid, pdk, selectedSubstance, enterprise };
+    const blob = new Blob([JSON.stringify(project, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${enterprise.projectNumber || "project"}_ond86.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // Загрузка проекта из JSON
+  const handleLoadProject = () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".json";
+    input.onchange = (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        try {
+          const project = JSON.parse(ev.target.result);
+          if (project.sources) setSources(project.sources);
+          if (project.meteo) setMeteo(project.meteo);
+          if (project.grid) setGrid(project.grid);
+          if (project.pdk != null) setPdk(project.pdk);
+          if (project.selectedSubstance) setSelectedSubstance(project.selectedSubstance);
+          if (project.enterprise) setEnterprise(project.enterprise);
+        } catch {
+          setError("Ошибка чтения файла проекта");
+        }
+      };
+      reader.readAsText(file);
+    };
+    input.click();
+  };
+
+  // Генерация таблиц ПДВ/ОВОС
+  const handleGenerateTables = async () => {
+    setTablesLoading(true);
+    try {
+      const payload = {
+        sources, meteo, grid, pdk,
+        substance: selectedSubstance,
+        enterprise,
+      };
+      const res = await fetchTables(payload);
+      setTables(res);
+    } catch {
+      setError("Ошибка формирования таблиц");
+    } finally {
+      setTablesLoading(false);
+    }
+  };
+
+  // Расчёт
   const handleCalculate = async () => {
     setLoading(true);
     setError(null);
     try {
-      const payload = {
-        sources,
-        meteo,
-        grid,
-        pdk,
-      };
+      const payload = { sources, meteo, grid, pdk };
       const res = await calculate(payload);
       setResult(res);
     } catch (e) {
       const detail = e?.response?.data?.detail;
       if (Array.isArray(detail)) {
-        // Pydantic validation errors — собираем в читаемый текст
         setError(detail.map(d => `${d.loc?.join(".")}: ${d.msg}`).join("; "));
       } else {
         setError(detail || e?.message || "Ошибка расчёта. Проверьте подключение к серверу.");
@@ -132,7 +264,7 @@ export default function App() {
     }
   };
 
-  // --- Экспорт PDF ---
+  // Экспорт PDF
   const handleExportPdf = async () => {
     setExporting(true);
     try {
@@ -179,6 +311,24 @@ export default function App() {
                 t={t}
               />
             ))}
+
+            {/* ---- Импорт CSV/Excel ---- */}
+            <ImportPanel
+              onImport={(imported) => {
+                setSources((prev) => [...prev, ...imported.map((s, i) => ({
+                  name: s.name || `Импорт ${prev.length + i + 1}`,
+                  lat: s.lat || (cities.find(c => c.name === meteo.city)?.lat ?? 41.3),
+                  lon: s.lon || (cities.find(c => c.name === meteo.city)?.lon ?? 69.24),
+                  height: s.height || 30,
+                  diameter: s.diameter || 1.0,
+                  velocity: s.velocity || 8.0,
+                  temperature: s.temperature || 120,
+                  emission_gs: s.emission_gs || null,
+                  emission_ty: s.emission_ty || null,
+                }))]);
+              }}
+              t={t}
+            />
           </div>
 
           {/* ---- Метеоданные ---- */}
@@ -186,21 +336,28 @@ export default function App() {
             meteo={meteo}
             cities={cities}
             onChange={setMeteo}
+            onLoadWeather={handleLoadWeather}
+            weatherLoading={weatherLoading}
+            t={t}
+          />
+
+          {/* ---- Карточка предприятия ---- */}
+          <EnterpriseCard
+            enterprise={enterprise}
+            onChange={setEnterprise}
             t={t}
           />
 
           {/* ---- Загрязняющее вещество ---- */}
-          <div className="panel-section">
-            <h3 className="section-title">Загрязняющее вещество</h3>
-            <div className="field-row">
-              <label>{t.pdk}</label>
-              <input
-                type="number" step="0.01" min="0"
-                value={pdk}
-                onChange={(e) => setPdk(parseFloat(e.target.value) || 0.5)}
-              />
-            </div>
-          </div>
+          <SubstancePanel
+            substances={allSubstances}
+            selectedSubstance={selectedSubstance}
+            pdk={pdk}
+            onSelect={handleSubstanceSelect}
+            onPdkChange={setPdk}
+            onAddCustom={handleAddCustomSubstance}
+            t={t}
+          />
 
           {/* ---- Расчётная область ---- */}
           <div className="panel-section">
@@ -223,6 +380,16 @@ export default function App() {
             </div>
           </div>
 
+          {/* ---- Сохранение / загрузка проекта ---- */}
+          <div className="panel-section" style={{ display: "flex", gap: 6 }}>
+            <button className="btn-secondary btn-sm" style={{ flex: 1 }} onClick={handleSaveProject}>
+              {t.saveProject}
+            </button>
+            <button className="btn-secondary btn-sm" style={{ flex: 1 }} onClick={handleLoadProject}>
+              {t.loadProject}
+            </button>
+          </div>
+
           {/* ---- Кнопка расчёта ---- */}
           {error && (
             <div className="error-msg">{error}</div>
@@ -243,6 +410,33 @@ export default function App() {
             exporting={exporting}
             t={t}
           />
+
+          {/* ---- Сценарии (до/после) ---- */}
+          {result && (
+            <ScenarioPanel
+              scenarioMode={scenarioMode}
+              onToggle={() => setScenarioMode(!scenarioMode)}
+              onSaveBaseline={() => setBaselineResult(JSON.parse(JSON.stringify(result)))}
+              baselineResult={baselineResult}
+              currentResult={result}
+              t={t}
+            />
+          )}
+
+          {/* ---- Таблицы ПДВ/ОВОС ---- */}
+          {result && (
+            <>
+              <button
+                className="btn-secondary"
+                style={{ width: "100%", marginTop: 8 }}
+                onClick={handleGenerateTables}
+                disabled={tablesLoading}
+              >
+                {tablesLoading ? t.generatingTables : t.generateTables}
+              </button>
+              <TablesPanel tables={tables} t={t} />
+            </>
+          )}
         </div>
       </aside>
 

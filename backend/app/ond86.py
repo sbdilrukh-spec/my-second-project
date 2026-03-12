@@ -154,37 +154,12 @@ def _cold_source(M, H, D, w0, A, F, eta) -> dict:
 # Расчёт поля концентраций на сетке (векторизованный)
 # ---------------------------------------------------------------------------
 
-def compute_grid(sources, meteo, city_data: dict, grid_radius: float, grid_step: float):
+def _compute_single_direction(sources, sigma_coeff, A, Ta, wd_rad, grid_lats, grid_lons):
     """
-    Рассчитывает приземные концентрации на регулярной сетке.
-
-    Возвращает:
-        lats      np.ndarray  — широты точек сетки
-        lons      np.ndarray  — долготы точек сетки
-        total_mg  np.ndarray  — суммарная концентрация, мг/м³
-        src_results list[dict]
+    Рассчитывает поле концентраций для одного направления ветра.
+    Возвращает total_c (г/м³) и src_results.
     """
-    A = city_data.get("A", 200)
-    sigma_coeff = STABILITY_SIGMA.get(meteo.stability_class, 0.08)
-    wd_rad = meteo.wind_direction * np.pi / 180.0
-
-    # ---------- Построение сетки ----------
-    # Центр сетки — первый источник (или центроид)
-    center_lat = sum(s.lat for s in sources) / len(sources)
-    center_lon = sum(s.lon for s in sources) / len(sources)
-
-    n_steps = int(grid_radius / grid_step)
-    offsets = np.arange(-n_steps, n_steps + 1) * grid_step   # [м]
-
-    # Восток/Север offset meshgrid
-    dx_e_2d, dy_n_2d = np.meshgrid(offsets, offsets)   # shape (N, N)
-
-    lat_rad_center = center_lat * np.pi / 180.0
-    grid_lats = (center_lat + dy_n_2d / 111_000.0).flatten()
-    grid_lons = (center_lon + dx_e_2d / (111_000.0 * np.cos(lat_rad_center))).flatten()
-
     total_c = np.zeros(len(grid_lats))
-
     src_results = []
 
     for src in sources:
@@ -198,7 +173,7 @@ def compute_grid(sources, meteo, city_data: dict, grid_radius: float, grid_step:
             D=src.diameter,
             w0=src.velocity,
             Tg=src.temperature,
-            Ta=meteo.temperature,
+            Ta=Ta,
             A=A,
         )
 
@@ -234,5 +209,144 @@ def compute_grid(sources, meteo, city_data: dict, grid_radius: float, grid_step:
         )
         total_c += Cm * s1_vals * s2_vals
 
-    total_mg = total_c * 1000.0   # г/м³ → мг/м³
+    return total_c, src_results
+
+
+def compute_grid(sources, meteo, city_data: dict, grid_radius: float, grid_step: float):
+    """
+    Рассчитывает приземные концентрации на регулярной сетке.
+
+    Режимы:
+        wind_mode="360"    — 36 направлений (шаг 10°), MAX в каждой точке (ОВОС)
+        wind_mode="single" — одно направление ветра
+
+    Возвращает:
+        lats      np.ndarray  — широты точек сетки
+        lons      np.ndarray  — долготы точек сетки
+        total_mg  np.ndarray  — суммарная концентрация, мг/м³
+        src_results list[dict]
+    """
+    A = city_data.get("A", 200)
+    sigma_coeff = STABILITY_SIGMA.get(meteo.stability_class, 0.08)
+    wind_mode = getattr(meteo, "wind_mode", "360")
+
+    # ---------- Построение сетки ----------
+    center_lat = sum(s.lat for s in sources) / len(sources)
+    center_lon = sum(s.lon for s in sources) / len(sources)
+
+    n_steps = int(grid_radius / grid_step)
+    offsets = np.arange(-n_steps, n_steps + 1) * grid_step   # [м]
+
+    dx_e_2d, dy_n_2d = np.meshgrid(offsets, offsets)   # shape (N, N)
+
+    lat_rad_center = center_lat * np.pi / 180.0
+    grid_lats = (center_lat + dy_n_2d / 111_000.0).flatten()
+    grid_lons = (center_lon + dx_e_2d / (111_000.0 * np.cos(lat_rad_center))).flatten()
+
+    if wind_mode == "360":
+        # ---------- Полный обзор 360° ----------
+        # 36 направлений с шагом 10°, в каждой точке берём МАКСИМУМ
+        total_c_max = np.zeros(len(grid_lats))
+        src_results = None
+
+        for angle_deg in range(0, 360, 10):
+            wd_rad = angle_deg * np.pi / 180.0
+            c_dir, sr = _compute_single_direction(
+                sources, sigma_coeff, A, meteo.temperature, wd_rad,
+                grid_lats, grid_lons,
+            )
+            total_c_max = np.maximum(total_c_max, c_dir)
+            if src_results is None:
+                src_results = sr  # параметры Cm/Xm не зависят от направления
+
+        total_mg = total_c_max * 1000.0
+    else:
+        # ---------- Одно направление ----------
+        wd_rad = meteo.wind_direction * np.pi / 180.0
+        total_c, src_results = _compute_single_direction(
+            sources, sigma_coeff, A, meteo.temperature, wd_rad,
+            grid_lats, grid_lons,
+        )
+        total_mg = total_c * 1000.0
+
+    if src_results is None:
+        src_results = []
+
     return grid_lats, grid_lons, total_mg, src_results
+
+
+def compute_szz_boundary(grid_lats, grid_lons, total_mg, pdk, center_lat, center_lon):
+    """
+    Определяет границу СЗЗ — точки, где концентрация равна ПДК.
+    Возвращает список точек контура [{lat, lon, distance_m, angle_deg}]
+    и статистику {max_distance, min_distance, area_ha}.
+    """
+    n_dirs = 36
+    boundary = []
+
+    for i in range(n_dirs):
+        angle = i * 10.0
+        angle_rad = angle * np.pi / 180.0
+
+        # Вычисляем расстояние от центра до каждой точки сетки в данном направлении
+        dx = (grid_lons - center_lon) * 111_000.0 * np.cos(center_lat * np.pi / 180.0)
+        dy = (grid_lats - center_lat) * 111_000.0
+
+        # Угол каждой точки от центра
+        point_angles = np.arctan2(dx, dy) * 180.0 / np.pi
+        point_angles = point_angles % 360
+
+        # Фильтруем точки в секторе ±5° от данного направления
+        angle_diff = np.abs(point_angles - angle)
+        angle_diff = np.minimum(angle_diff, 360 - angle_diff)
+        in_sector = angle_diff < 5.0
+
+        if not np.any(in_sector):
+            continue
+
+        distances = np.sqrt(dx ** 2 + dy ** 2)
+        sector_distances = distances[in_sector]
+        sector_conc = total_mg[in_sector]
+
+        # Находим максимальное расстояние, где концентрация >= ПДК
+        exceeds = sector_conc >= pdk
+        if np.any(exceeds):
+            max_dist = float(sector_distances[exceeds].max())
+        else:
+            max_dist = 0.0
+
+        # Точка на границе СЗЗ
+        dist_deg_lat = max_dist * np.cos(angle_rad) / 111_000.0
+        dist_deg_lon = max_dist * np.sin(angle_rad) / (111_000.0 * np.cos(center_lat * np.pi / 180.0))
+
+        boundary.append({
+            "lat": round(center_lat + dist_deg_lat, 6),
+            "lon": round(center_lon + dist_deg_lon, 6),
+            "distance_m": round(max_dist, 1),
+            "angle_deg": angle,
+        })
+
+    # Статистика
+    all_distances = [p["distance_m"] for p in boundary]
+    max_distance = max(all_distances) if all_distances else 0
+    min_distance = min(d for d in all_distances if d > 0) if any(d > 0 for d in all_distances) else 0
+
+    # Площадь превышения ПДК (приблизительно)
+    exceeds_mask = total_mg >= pdk
+    n_exceeds = int(exceeds_mask.sum())
+    n_total = len(total_mg)
+    side = int(np.sqrt(n_total))
+    if side > 0:
+        grid_step_approx = np.abs(grid_lats[1] - grid_lats[0]) * 111_000.0 if n_total > 1 else 100
+        cell_area = grid_step_approx ** 2
+        area_m2 = n_exceeds * cell_area
+        area_ha = area_m2 / 10_000.0
+    else:
+        area_ha = 0
+
+    return {
+        "boundary": boundary,
+        "max_distance_m": round(max_distance, 1),
+        "min_distance_m": round(min_distance, 1),
+        "area_ha": round(area_ha, 2),
+    }
