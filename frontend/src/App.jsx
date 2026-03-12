@@ -3,7 +3,7 @@ import { fetchCities, fetchSubstances, fetchWeather, calculate, fetchTables, exp
 import { translations } from "./i18n.js";
 import SourceForm, { createDefaultSource } from "./components/SourceForm.jsx";
 import MeteoPanel from "./components/MeteoPanel.jsx";
-import SubstancePanel from "./components/SubstancePanel.jsx";
+
 import EnterpriseCard, { DEFAULT_ENTERPRISE } from "./components/EnterpriseCard.jsx";
 import TablesPanel from "./components/TablesPanel.jsx";
 import ScenarioPanel from "./components/ScenarioPanel.jsx";
@@ -38,7 +38,6 @@ export default function App() {
   const [substances, setSubstances] = useState([]);
   const [meteo, setMeteo] = useState(savedProject?.meteo || DEFAULT_METEO);
   const [grid, setGrid] = useState(savedProject?.grid || DEFAULT_GRID);
-  const [pdk, setPdk] = useState(savedProject?.pdk ?? 0.5);
   const [selectedSubstance, setSelectedSubstance] = useState(savedProject?.selectedSubstance || null);
   const [sources, setSources] = useState(savedProject?.sources || [createDefaultSource(41.2995, 69.2401, 0)]);
   const [enterprise, setEnterprise] = useState(savedProject?.enterprise || DEFAULT_ENTERPRISE);
@@ -59,7 +58,7 @@ export default function App() {
 
   // --- Автосохранение каждые 30 секунд ---
   const autosaveRef = useRef();
-  autosaveRef.current = { sources, meteo, grid, pdk, selectedSubstance, enterprise };
+  autosaveRef.current = { sources, meteo, grid, selectedSubstance, enterprise };
 
   useEffect(() => {
     const save = () => {
@@ -152,14 +151,6 @@ export default function App() {
     handleSourceChange(index, "lon", lon);
   };
 
-  // Выбор вещества из справочника
-  const handleSubstanceSelect = (substance) => {
-    setSelectedSubstance(substance);
-    if (substance && substance.pdk_mr != null) {
-      setPdk(substance.pdk_mr);
-    }
-  };
-
   // Добавление пользовательского вещества
   const handleAddCustomSubstance = (substance) => {
     setCustomSubstances((prev) => [...prev, substance]);
@@ -189,7 +180,7 @@ export default function App() {
 
   // Сохранение проекта в JSON
   const handleSaveProject = () => {
-    const project = { sources, meteo, grid, pdk, selectedSubstance, enterprise };
+    const project = { sources, meteo, grid, selectedSubstance, enterprise };
     const blob = new Blob([JSON.stringify(project, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -214,7 +205,6 @@ export default function App() {
           if (project.sources) setSources(project.sources);
           if (project.meteo) setMeteo(project.meteo);
           if (project.grid) setGrid(project.grid);
-          if (project.pdk != null) setPdk(project.pdk);
           if (project.selectedSubstance) setSelectedSubstance(project.selectedSubstance);
           if (project.enterprise) setEnterprise(project.enterprise);
         } catch {
@@ -230,9 +220,10 @@ export default function App() {
   const handleGenerateTables = async () => {
     setTablesLoading(true);
     try {
+      const pdk = Math.min(...sources.map(s => s.pdk ?? 0.5));
       const payload = {
         sources, meteo, grid, pdk,
-        substance: selectedSubstance,
+        substance: sources[0]?.substance || selectedSubstance,
         enterprise,
       };
       const res = await fetchTables(payload);
@@ -249,6 +240,7 @@ export default function App() {
     setLoading(true);
     setError(null);
     try {
+      const pdk = Math.min(...sources.map(s => s.pdk ?? 0.5));
       const payload = { sources, meteo, grid, pdk };
       const res = await calculate(payload);
       setResult(res);
@@ -268,6 +260,7 @@ export default function App() {
   const handleExportPdf = async () => {
     setExporting(true);
     try {
+      const pdk = Math.min(...sources.map(s => s.pdk ?? 0.5));
       await exportPdf({ sources, meteo, grid, pdk });
     } catch (e) {
       setError("Ошибка генерации PDF.");
@@ -308,6 +301,8 @@ export default function App() {
                 onChange={handleSourceChange}
                 onRemove={handleRemoveSource}
                 onPickFromMap={handlePickFromMap}
+                substances={allSubstances}
+                onAddCustomSubstance={handleAddCustomSubstance}
                 t={t}
               />
             ))}
@@ -345,17 +340,6 @@ export default function App() {
           <EnterpriseCard
             enterprise={enterprise}
             onChange={setEnterprise}
-            t={t}
-          />
-
-          {/* ---- Загрязняющее вещество ---- */}
-          <SubstancePanel
-            substances={allSubstances}
-            selectedSubstance={selectedSubstance}
-            pdk={pdk}
-            onSelect={handleSubstanceSelect}
-            onPdkChange={setPdk}
-            onAddCustom={handleAddCustomSubstance}
             t={t}
           />
 

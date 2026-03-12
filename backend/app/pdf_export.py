@@ -247,12 +247,15 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
 
     # --- 1. Источники выбросов ---
     story.append(Paragraph("1. Параметры источников выбросов", h1_style))
-    src_headers = ["Название", "H, м", "D, м", "w₀, м/с", "Tг, °C", "M, г/с"]
+    src_headers = ["Название", "H, м", "D, м", "w₀, м/с", "Tг, °C", "M, г/с", "M, т/год"]
     src_rows = [src_headers]
     for s in request_data.get("sources", []):
         M_gs = s.get("emission_gs") or 0.0
-        if not M_gs and s.get("emission_ty"):
-            M_gs = round(s["emission_ty"] * 1_000_000 / (365.25 * 24 * 3600), 4)
+        M_ty = s.get("emission_ty") or 0.0
+        if not M_gs and M_ty:
+            M_gs = round(M_ty * 1_000_000 / (365.25 * 24 * 3600), 4)
+        if not M_ty and M_gs:
+            M_ty = round(M_gs * 365.25 * 24 * 3600 / 1_000_000, 4)
         src_rows.append([
             s.get("name", "—"),
             str(s.get("height", "—")),
@@ -260,8 +263,9 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
             str(s.get("velocity", "—")),
             str(s.get("temperature", "—")),
             str(round(M_gs, 4)),
+            str(round(M_ty, 4)),
         ])
-    col_w = [W * f for f in [0.30, 0.12, 0.12, 0.13, 0.13, 0.20]]
+    col_w = [W * f for f in [0.24, 0.10, 0.10, 0.12, 0.12, 0.16, 0.16]]
     t = Table(src_rows, colWidths=col_w)
     t.setStyle(TABLE_STYLE)
     story.append(t)

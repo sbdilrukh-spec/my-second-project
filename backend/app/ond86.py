@@ -182,7 +182,7 @@ def _compute_single_direction(sources, sigma_coeff, A, Ta, wd_rad, grid_lats, gr
 
         src_results.append({
             "name": src.name,
-            "cm_mg": round(Cm * 1000.0, 6),   # г/м³ → мг/м³
+            "cm_mg": round(Cm, 6),   # формула ОНД-86 уже даёт мг/м³
             "xm": round(Xm, 1),
         })
 
@@ -259,7 +259,7 @@ def compute_grid(sources, meteo, city_data: dict, grid_radius: float, grid_step:
             if src_results is None:
                 src_results = sr  # параметры Cm/Xm не зависят от направления
 
-        total_mg = total_c_max * 1000.0
+        total_mg = total_c_max  # формула ОНД-86 уже даёт мг/м³
     else:
         # ---------- Одно направление ----------
         wd_rad = meteo.wind_direction * np.pi / 180.0
@@ -267,7 +267,7 @@ def compute_grid(sources, meteo, city_data: dict, grid_radius: float, grid_step:
             sources, sigma_coeff, A, meteo.temperature, wd_rad,
             grid_lats, grid_lons,
         )
-        total_mg = total_c * 1000.0
+        total_mg = total_c  # формула ОНД-86 уже даёт мг/м³
 
     if src_results is None:
         src_results = []
