@@ -438,6 +438,7 @@ export default function App() {
           onViewModeChange={setViewMode}
           gridStep={grid.step}
           gridRadius={grid.radius}
+          currentPdk={Math.min(...sources.map(s => s.pdk ?? 0.5))}
         />
       </main>
     </div>
