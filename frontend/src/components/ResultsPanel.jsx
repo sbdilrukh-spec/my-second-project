@@ -5,7 +5,7 @@ function fmt(val, digits = 4) {
   return isNaN(n) ? "—" : n.toFixed(digits);
 }
 
-export default function ResultsPanel({ result, onExportPdf, exporting, t }) {
+export default function ResultsPanel({ result, currentPdk, onExportPdf, exporting, t }) {
   if (!result) {
     return (
       <div className="panel-section results-empty">
@@ -18,15 +18,16 @@ export default function ResultsPanel({ result, onExportPdf, exporting, t }) {
   }
 
   const maxC = parseFloat(result.max_c) || 0;
-  const pdk  = parseFloat(result.pdk)   || 0.5;
+  const pdk  = currentPdk != null ? currentPdk : (parseFloat(result.pdk) || 0.5);
   const pdk_ratio = pdk > 0 ? maxC / pdk : null;
+  const exceeds = maxC > pdk;
 
   return (
     <div className="panel-section">
       <h3 className="section-title">{t.results}</h3>
 
-      <div className={`result-badge ${result.exceeds_pdk ? "badge-danger" : "badge-ok"}`}>
-        {result.exceeds_pdk ? t.exceedsPdk : t.noExceedsPdk}
+      <div className={`result-badge ${exceeds ? "badge-danger" : "badge-ok"}`}>
+        {exceeds ? t.exceedsPdk : t.noExceedsPdk}
       </div>
 
       <div className="result-row">
@@ -37,7 +38,7 @@ export default function ResultsPanel({ result, onExportPdf, exporting, t }) {
       {pdk_ratio !== null && (
         <div className="result-row">
           <span className="result-label">Cmax / ПДК</span>
-          <span className={`result-value ${result.exceeds_pdk ? "text-danger" : "text-ok"}`}>
+          <span className={`result-value ${exceeds ? "text-danger" : "text-ok"}`}>
             {fmt(pdk_ratio, 3)}
           </span>
         </div>

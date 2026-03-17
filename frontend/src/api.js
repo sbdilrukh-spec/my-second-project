@@ -17,13 +17,13 @@ export async function fetchWeather(lat, lon) {
   return res.data;
 }
 
-export async function calculate(payload) {
-  const res = await axios.post(`${BASE}/calculate`, payload);
+export async function fetchTables(payload) {
+  const res = await axios.post(`${BASE}/tables`, payload);
   return res.data;
 }
 
-export async function fetchTables(payload) {
-  const res = await axios.post(`${BASE}/tables`, payload);
+export async function calculate(payload) {
+  const res = await axios.post(`${BASE}/calculate`, payload);
   return res.data;
 }
 

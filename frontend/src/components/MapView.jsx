@@ -156,9 +156,9 @@ function GridOverlay({ points, maxC, gridStep, centerLat, centerLon }) {
           ctx.fillText(p.c.toFixed(4), px.x, px.y);
         }
 
-        // Собираем для осей
-        const xKey = Math.round(dx);
-        const yKey = Math.round(dy);
+        // Собираем для осей (расстояние от источника — всегда положительное)
+        const xKey = Math.abs(Math.round(dx));
+        const yKey = Math.abs(Math.round(dy));
         if (!xAxis[xKey]) xAxis[xKey] = px.x;
         if (!yAxis[yKey]) yAxis[yKey] = px.y;
         if (px.x < minScreenX) minScreenX = px.x;
@@ -189,7 +189,7 @@ function GridOverlay({ points, maxC, gridStep, centerLat, centerLon }) {
         ctx.fillStyle = "#000";
         ctx.font = `bold ${axFontSize + 1}px sans-serif`;
         ctx.textAlign = "right";
-        ctx.fillText("X, м→", size.x - 6, maxScreenY + half + labelH / 2 + 2);
+        ctx.fillText("Расст. X, м→", size.x - 6, maxScreenY + half + labelH / 2 + 2);
 
         // Y-ось (слева)
         const axisLabelW = Math.min(cellPx * 0.85, 40);
@@ -210,7 +210,7 @@ function GridOverlay({ points, maxC, gridStep, centerLat, centerLon }) {
         ctx.fillStyle = "#000";
         ctx.font = `bold ${axFontSize + 1}px sans-serif`;
         ctx.textAlign = "center";
-        ctx.fillText("↑Y, м", minScreenX - half - axisLabelW / 2 - 2, 14);
+        ctx.fillText("↑Расст. Y, м", minScreenX - half - axisLabelW / 2 - 2, 14);
       }
     }
 

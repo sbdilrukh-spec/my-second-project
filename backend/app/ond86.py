@@ -235,9 +235,9 @@ def compute_grid(sources, meteo, city_data: dict, grid_radius: float, grid_step:
     center_lon = sum(s.lon for s in sources) / len(sources)
 
     n_steps = int(grid_radius / grid_step)
-    offsets = np.arange(-n_steps, n_steps + 1) * grid_step   # [м]
+    offsets = np.arange(-n_steps, n_steps + 1) * grid_step  # [-radius, ..., 0, ..., radius]
 
-    dx_e_2d, dy_n_2d = np.meshgrid(offsets, offsets)   # shape (N, N)
+    dx_e_2d, dy_n_2d = np.meshgrid(offsets, offsets)   # shape (2N+1, 2N+1)
 
     lat_rad_center = center_lat * np.pi / 180.0
     grid_lats = (center_lat + dy_n_2d / 111_000.0).flatten()

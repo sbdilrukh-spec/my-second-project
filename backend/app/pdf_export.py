@@ -184,13 +184,21 @@ def _make_concentration_plot(points_data: list, grid_step: float = 200,
     ax.set_xlim(unique_x[0] - grid_step / 2, unique_x[-1] + grid_step / 2)
     ax.set_ylim(unique_y[0] - grid_step / 2, unique_y[-1] + grid_step / 2)
     ax.set_aspect("equal")
-    ax.set_xlabel("X, м (от источника)", fontsize=9)
-    ax.set_ylabel("Y, м (от источника)", fontsize=9)
+    ax.set_xlabel("Расстояние X, м", fontsize=9)
+    ax.set_ylabel("Расстояние Y, м", fontsize=9)
+
+    # Маркер источника (0, 0)
+    if 0 in unique_x and 0 in unique_y:
+        ax.plot(0, 0, marker="^", color="#DC2626", markersize=10, zorder=5)
+        ax.text(0, -grid_step * 0.35, "Источник", ha="center", va="top",
+                fontsize=font_size + 1, color="#DC2626", fontweight="bold")
     ax.set_title(title, fontsize=11, fontweight="bold")
 
-    # Жёлтые метки осей
+    # Жёлтые метки осей (расстояние от источника — всегда положительное)
     ax.set_xticks(unique_x)
+    ax.set_xticklabels([str(abs(v)) for v in unique_x])
     ax.set_yticks(unique_y)
+    ax.set_yticklabels([str(abs(v)) for v in unique_y])
     ax.tick_params(labelsize=font_size)
     for lbl in ax.get_xticklabels():
         lbl.set_bbox(dict(facecolor="#FFE000", edgecolor="#333", linewidth=0.5, pad=2))

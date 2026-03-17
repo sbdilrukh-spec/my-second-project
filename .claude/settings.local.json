@@ -10,7 +10,19 @@
       "Bash(venv/Scripts/python:*)",
       "Bash(git status -u)",
       "Bash(git rm -r --cached frontend/node_modules backend/app/__pycache__)",
-      "Bash(git add .gitignore backend/ frontend/ start-backend.bat start-frontend.bat .claude/)"
+      "Bash(git add .gitignore backend/ frontend/ start-backend.bat start-frontend.bat .claude/)",
+      "Bash(git commit:*)",
+      "Bash(git remote add origin https://github.com/sbdilrukh-spec/my-second-project.git)",
+      "Bash(git push -u origin main)",
+      "Bash(git ls-remote https://github.com/sbdilrukh-spec/my-first-project.git)",
+      "Bash(pip install httpx openpyxl)",
+      "Bash(npx --yes vite build)",
+      "Bash(cd /c/Users/MOUSE/Documents/Projects/\"My first project\"/frontend)",
+      "Bash(timeout 5)",
+      "Read(//c/Users/MOUSE/AppData/Local/Temp/claude/c--Users-MOUSE-Documents-Projects-My-first-project/tasks/**)",
+      "Bash(cd /c/Users/MOUSE/Documents/Projects/\"My first project\"/backend)",
+      "Bash(python -m uvicorn app.main:app --reload --port 8000)",
+      "Bash(python -c \":*)"
     ]
   }
 }

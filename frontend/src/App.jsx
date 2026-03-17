@@ -390,6 +390,7 @@ export default function App() {
           {/* ---- Результаты ---- */}
           <ResultsPanel
             result={result}
+            currentPdk={Math.min(...sources.map(s => s.pdk ?? 0.5))}
             onExportPdf={handleExportPdf}
             exporting={exporting}
             t={t}
