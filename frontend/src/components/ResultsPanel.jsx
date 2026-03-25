@@ -5,7 +5,7 @@ function fmt(val, digits = 4) {
   return isNaN(n) ? "—" : n.toFixed(digits);
 }
 
-export default function ResultsPanel({ result, currentPdk, onExportPdf, exporting, t }) {
+export default function ResultsPanel({ result, currentPdk, onExportPdf, exporting, onExportExcel, exportingExcel, t }) {
   if (!result) {
     return (
       <div className="panel-section results-empty">
@@ -95,14 +95,24 @@ export default function ResultsPanel({ result, currentPdk, onExportPdf, exportin
         </div>
       )}
 
-      <button
-        className="btn-primary"
-        style={{ width: "100%", marginTop: 14 }}
-        onClick={onExportPdf}
-        disabled={exporting}
-      >
-        {exporting ? t.exporting : t.exportPdf}
-      </button>
+      <div style={{ display: "flex", gap: 6, marginTop: 14 }}>
+        <button
+          className="btn-primary"
+          style={{ flex: 1 }}
+          onClick={onExportPdf}
+          disabled={exporting}
+        >
+          {exporting ? t.exporting : t.exportPdf}
+        </button>
+        <button
+          className="btn-secondary"
+          style={{ flex: 1 }}
+          onClick={onExportExcel}
+          disabled={exportingExcel}
+        >
+          {exportingExcel ? "Экспорт..." : "Excel"}
+        </button>
+      </div>
     </div>
   );
 }

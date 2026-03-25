@@ -38,3 +38,17 @@ export async function exportPdf(payload) {
   a.click();
   window.URL.revokeObjectURL(url);
 }
+
+export async function exportExcel(payload) {
+  const res = await axios.post(`${BASE}/export/excel`, payload, {
+    responseType: "blob",
+  });
+  const url = window.URL.createObjectURL(
+    new Blob([res.data], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" })
+  );
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "ond86_tables.xlsx";
+  a.click();
+  window.URL.revokeObjectURL(url);
+}

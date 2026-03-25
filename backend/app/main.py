@@ -2,6 +2,8 @@ from fastapi import FastAPI, HTTPException, Query, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, PlainTextResponse
 import io
+import openpyxl
+from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 
 from .models import CalculationRequest, CalculationResponse, GridPoint, SourceResult, SzzResult, SzzBoundaryPoint
 from .meteo_data import CITIES
@@ -9,7 +11,7 @@ from .ond86 import compute_grid, compute_szz_boundary
 from .pdf_export import generate_pdf
 from .substances import SUBSTANCES
 from .tables import generate_pdv_tables, generate_ovos_tables
-from .import_sources import parse_csv, parse_excel, generate_template_csv
+from .import_sources import parse_csv, parse_excel, generate_template_csv, generate_template_xlsx
 
 app = FastAPI(title="ОНД-86 API", version="1.0.0")
 
@@ -88,11 +90,11 @@ async def import_sources(file: UploadFile = File(...)):
 
 @app.get("/api/import/template")
 def get_import_template():
-    csv_text = generate_template_csv()
-    return PlainTextResponse(
-        content=csv_text,
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=template_sources.csv"},
+    xlsx_bytes = generate_template_xlsx()
+    return StreamingResponse(
+        io.BytesIO(xlsx_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=template_sources.xlsx"},
     )
 
 
@@ -321,6 +323,105 @@ def export_pdf(req: CalculationRequest):
         io.BytesIO(pdf_bytes),
         media_type="application/pdf",
         headers={"Content-Disposition": "attachment; filename=ond86_report.pdf"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /api/export/excel  — генерация Excel-отчёта (таблицы ПДВ + ОВОС)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/export/excel")
+def export_excel(req: CalculationRequest):
+    city_data = CITIES.get(req.meteo.city, {"A": 200})
+
+    lats, lons, total_mg, src_results = compute_grid(
+        sources=req.sources,
+        meteo=req.meteo,
+        city_data=city_data,
+        grid_radius=req.grid.radius,
+        grid_step=req.grid.step,
+    )
+
+    max_idx = int(total_mg.argmax())
+    max_c = float(total_mg[max_idx])
+    pdk = req.pdk or 0.5
+
+    result_dict = {
+        "max_c": max_c,
+        "source_results": src_results,
+        "exceeds_pdk": max_c > pdk,
+        "pdk": pdk,
+    }
+
+    substance = req.substance.model_dump() if req.substance else None
+
+    pdv = generate_pdv_tables(req.sources, req.meteo, city_data, substance, result_dict)
+    ovos = generate_ovos_tables(req.sources, req.meteo, city_data, substance, result_dict)
+
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    header_font = Font(bold=True, size=11)
+    header_fill = PatternFill(start_color="2563EB", end_color="2563EB", fill_type="solid")
+    header_font_white = Font(bold=True, size=11, color="FFFFFF")
+    thin_border = Border(
+        left=Side(style="thin"),
+        right=Side(style="thin"),
+        top=Side(style="thin"),
+        bottom=Side(style="thin"),
+    )
+
+    all_tables = {**pdv, **ovos}
+
+    for key, table_data in all_tables.items():
+        title = table_data["title"]
+        columns = table_data["columns"]
+        rows = table_data["rows"]
+
+        ws = wb.create_sheet(title=key)
+
+        # Title row
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(columns))
+        cell = ws.cell(row=1, column=1, value=title)
+        cell.font = Font(bold=True, size=13)
+        cell.alignment = Alignment(horizontal="center")
+
+        # Header row
+        for col_idx, col_name in enumerate(columns, 1):
+            cell = ws.cell(row=3, column=col_idx, value=col_name)
+            cell.font = header_font_white
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center", wrap_text=True)
+            cell.border = thin_border
+
+        # Data rows
+        for row_idx, row_data in enumerate(rows, 4):
+            values = list(row_data.values())
+            for col_idx, val in enumerate(values, 1):
+                if col_idx > len(columns):
+                    break
+                cell = ws.cell(row=row_idx, column=col_idx, value=val)
+                cell.border = thin_border
+                cell.alignment = Alignment(horizontal="center")
+
+        # Auto-width
+        for col_idx in range(1, len(columns) + 1):
+            max_len = len(str(columns[col_idx - 1]))
+            for row in ws.iter_rows(min_row=4, min_col=col_idx, max_col=col_idx):
+                for cell in row:
+                    if cell.value is not None:
+                        max_len = max(max_len, len(str(cell.value)))
+            ws.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = min(max_len + 4, 30)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    filename = "ond86_tables.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
 
 

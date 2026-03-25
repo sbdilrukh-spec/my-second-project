@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { fetchCities, fetchSubstances, fetchWeather, calculate, fetchTables, exportPdf } from "./api.js";
+import { fetchCities, fetchSubstances, fetchWeather, calculate, fetchTables, exportPdf, exportExcel } from "./api.js";
 import { translations } from "./i18n.js";
 import SourceForm, { createDefaultSource } from "./components/SourceForm.jsx";
 import MeteoPanel from "./components/MeteoPanel.jsx";
@@ -10,6 +10,7 @@ import ScenarioPanel from "./components/ScenarioPanel.jsx";
 import ImportPanel from "./components/ImportPanel.jsx";
 import MapView from "./components/MapView.jsx";
 import ResultsPanel from "./components/ResultsPanel.jsx";
+import TableInput from "./components/TableInput.jsx";
 
 const DEFAULT_METEO = {
   city: "Ташкент",
@@ -51,6 +52,7 @@ export default function App() {
   const [viewMode, setViewMode] = useState("heatmap");
 
   const [pickingIndex, setPickingIndex] = useState(null);
+  const [inputMode, setInputMode] = useState("cards"); // "cards" | "table"
 
   // --- Сценарии (до/после) ---
   const [scenarioMode, setScenarioMode] = useState(false);
@@ -134,6 +136,16 @@ export default function App() {
 
   const handleRemoveSource = (index) => {
     setSources((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handleBulkAddSources = (parsed) => {
+    const city = cities.find((c) => c.name === meteo.city);
+    const newSources = parsed.map((s, i) => ({
+      ...createDefaultSource(city?.lat ?? 41.3, city?.lon ?? 69.24, sources.length + i),
+      ...s,
+      name: s.name || `Источник ${sources.length + i + 1}`,
+    }));
+    setSources((prev) => [...prev, ...newSources]);
   };
 
   const handlePickFromMap = (index) => {
@@ -261,11 +273,25 @@ export default function App() {
     setExporting(true);
     try {
       const pdk = Math.min(...sources.map(s => s.pdk ?? 0.5));
-      await exportPdf({ sources, meteo, grid, pdk });
+      await exportPdf({ sources, meteo, grid, pdk, substance: sources[0]?.substance || selectedSubstance, enterprise });
     } catch (e) {
       setError("Ошибка генерации PDF.");
     } finally {
       setExporting(false);
+    }
+  };
+
+  // Экспорт Excel
+  const [exportingExcel, setExportingExcel] = useState(false);
+  const handleExportExcel = async () => {
+    setExportingExcel(true);
+    try {
+      const pdk = Math.min(...sources.map(s => s.pdk ?? 0.5));
+      await exportExcel({ sources, meteo, grid, pdk, substance: sources[0]?.substance || selectedSubstance, enterprise });
+    } catch (e) {
+      setError("Ошибка генерации Excel.");
+    } finally {
+      setExportingExcel(false);
     }
   };
 
@@ -286,26 +312,59 @@ export default function App() {
         <div className="sidebar-scroll">
           {/* ---- Источники ---- */}
           <div className="panel-section">
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 4 }}>
               <h3 className="section-title" style={{ margin: 0 }}>{t.sources}</h3>
-              <button className="btn-secondary btn-sm" onClick={handleAddSource}>
-                {t.addSource}
-              </button>
+              <div style={{ display: "flex", gap: 4 }}>
+                <button
+                  className={`btn-sm ${inputMode === "cards" ? "btn-primary" : "btn-secondary"}`}
+                  onClick={() => setInputMode("cards")}
+                  style={{ fontSize: 11, padding: "3px 8px" }}
+                >
+                  Карточки
+                </button>
+                <button
+                  className={`btn-sm ${inputMode === "table" ? "btn-primary" : "btn-secondary"}`}
+                  onClick={() => setInputMode("table")}
+                  style={{ fontSize: 11, padding: "3px 8px" }}
+                >
+                  Таблица
+                </button>
+              </div>
             </div>
 
-            {sources.map((src, i) => (
-              <SourceForm
-                key={i}
-                source={src}
-                index={i}
-                onChange={handleSourceChange}
-                onRemove={handleRemoveSource}
-                onPickFromMap={handlePickFromMap}
-                substances={allSubstances}
-                onAddCustomSubstance={handleAddCustomSubstance}
-                t={t}
-              />
-            ))}
+            {inputMode === "cards" ? (
+              <>
+                <button className="btn-secondary btn-sm" style={{ width: "100%", marginTop: 6 }} onClick={handleAddSource}>
+                  {t.addSource}
+                </button>
+                {sources.map((src, i) => (
+                  <SourceForm
+                    key={i}
+                    source={src}
+                    index={i}
+                    onChange={handleSourceChange}
+                    onRemove={handleRemoveSource}
+                    onPickFromMap={handlePickFromMap}
+                    substances={allSubstances}
+                    onAddCustomSubstance={handleAddCustomSubstance}
+                    t={t}
+                  />
+                ))}
+              </>
+            ) : (
+              <>
+                <TableInput
+                  sources={sources}
+                  onChange={handleSourceChange}
+                  onAdd={handleBulkAddSources}
+                  onRemove={handleRemoveSource}
+                  t={t}
+                />
+                <button className="btn-secondary btn-sm" style={{ width: "100%", marginTop: 6 }} onClick={handleAddSource}>
+                  {t.addSource}
+                </button>
+              </>
+            )}
 
             {/* ---- Импорт CSV/Excel ---- */}
             <ImportPanel
@@ -393,6 +452,8 @@ export default function App() {
             currentPdk={Math.min(...sources.map(s => s.pdk ?? 0.5))}
             onExportPdf={handleExportPdf}
             exporting={exporting}
+            onExportExcel={handleExportExcel}
+            exportingExcel={exportingExcel}
             t={t}
           />
 
@@ -439,6 +500,9 @@ export default function App() {
           gridStep={grid.step}
           gridRadius={grid.radius}
           currentPdk={Math.min(...sources.map(s => s.pdk ?? 0.5))}
+          meteo={meteo}
+          enterprise={enterprise}
+          substance={sources[0]?.substance || selectedSubstance}
         />
       </main>
     </div>

@@ -8,8 +8,9 @@ from typing import List, Dict, Any
 
 # Маппинг допустимых названий столбцов к каноническим
 COLUMN_MAP = {
-    # Название
+    # Название / номер
     "название": "name", "name": "name", "источник": "name", "source": "name",
+    "№": "name", "номер": "name", "number": "name", "n": "name",
     # Высота
     "высота": "height", "h": "height", "h, м": "height", "height": "height",
     "высота трубы": "height", "высота, м": "height",
@@ -140,7 +141,50 @@ def parse_excel(file_bytes: bytes) -> List[Dict[str, Any]]:
 
 
 def generate_template_csv() -> str:
-    """Генерирует CSV-шаблон для импорта."""
+    """Генерирует CSV-шаблон для импорта (с BOM для Excel)."""
     header = "Название;Высота (H), м;Диаметр (D), м;Скорость (w0), м/с;Температура (Tг), °C;Выброс (M), г/с;Выброс, т/год;Широта;Долгота"
     example = "Труба ТЭЦ-1;45;1.2;12.0;180;8.5;268.06;41.2995;69.2401"
     return f"{header}\n{example}\n"
+
+
+def generate_template_xlsx() -> bytes:
+    """Генерирует Excel-шаблон для импорта."""
+    import openpyxl
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Источники"
+
+    headers = [
+        "№", "Высота (H), м", "Диаметр (D), м",
+        "Скорость (w0), м/с", "Температура (Tг), °C",
+        "Выброс (M), г/с", "Выброс, т/год",
+    ]
+
+    header_font = Font(bold=True, size=11, color="FFFFFF")
+    header_fill = PatternFill(start_color="2563EB", end_color="2563EB", fill_type="solid")
+    thin_border = Border(
+        left=Side(style="thin"), right=Side(style="thin"),
+        top=Side(style="thin"), bottom=Side(style="thin"),
+    )
+
+    for col, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col, value=h)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", wrap_text=True)
+        cell.border = thin_border
+
+    example = [1, 45, 1.2, 12.0, 180, 8.5, 268.06]
+    for col, val in enumerate(example, 1):
+        cell = ws.cell(row=2, column=col, value=val)
+        cell.border = thin_border
+        cell.alignment = Alignment(horizontal="center")
+
+    for col in range(1, len(headers) + 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = 18
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()

@@ -156,11 +156,11 @@ function GridOverlay({ points, maxC, gridStep, centerLat, centerLon }) {
           ctx.fillText(p.c.toFixed(4), px.x, px.y);
         }
 
-        // Собираем для осей (расстояние от источника — всегда положительное)
-        const xKey = Math.abs(Math.round(dx));
-        const yKey = Math.abs(Math.round(dy));
-        if (!xAxis[xKey]) xAxis[xKey] = px.x;
-        if (!yAxis[yKey]) yAxis[yKey] = px.y;
+        // Собираем для осей (реальные смещения dx/dy в метрах)
+        const xKey = Math.round(dx);
+        const yKey = Math.round(dy);
+        xAxis[xKey] = px.x;
+        yAxis[yKey] = px.y;
         if (px.x < minScreenX) minScreenX = px.x;
         if (px.y > maxScreenY) maxScreenY = px.y;
       }
@@ -168,12 +168,34 @@ function GridOverlay({ points, maxC, gridStep, centerLat, centerLon }) {
       // ── Оси (жёлтые метки) ──────────────────────────────────────────────────
       if (cellPx >= 14) {
         const labelH = Math.min(cellPx * 0.55, 16);
-        const labelW = cellPx * 0.9;
+        const labelW = Math.max(cellPx * 0.9, 36);
         const axFontSize = Math.max(6, Math.min(10, cellPx / 7));
 
-        // X-ось (снизу)
-        for (const [dxStr, screenX] of Object.entries(xAxis)) {
+        // Прореживание: показываем метки не чаще чем каждые ~50px на экране
+        const allXKeys = Object.keys(xAxis).map(Number).sort((a, b) => a - b);
+        const allYKeys = Object.keys(yAxis).map(Number).sort((a, b) => a - b);
+
+        // Вычисляем шаг прореживания
+        const minLabelGap = 50; // минимум пикселей между метками
+        let xStepLabels = gridStep;
+        while (xStepLabels * cellPx / gridStep < minLabelGap && xStepLabels < gridStep * 20) {
+          xStepLabels += gridStep;
+        }
+        // Округляем шаг меток до красивых значений (100, 200, 500, 1000...)
+        const niceSteps = [100, 200, 500, 1000, 2000, 5000];
+        for (const ns of niceSteps) {
+          if (ns >= xStepLabels) { xStepLabels = ns; break; }
+        }
+
+        const filteredX = allXKeys.filter((v) => v % xStepLabels === 0);
+        const filteredY = allYKeys.filter((v) => v % xStepLabels === 0);
+
+        // X-ось (снизу) — показываем расстояние от источника
+        for (const dx of filteredX) {
+          const screenX = xAxis[dx];
+          if (screenX == null) continue;
           const screenY = maxScreenY + half + 2;
+          const label = String(dx);
           ctx.fillStyle = "rgba(255,220,0,0.95)";
           ctx.fillRect(screenX - labelW / 2, screenY, labelW, labelH);
           ctx.strokeStyle = "#333";
@@ -183,18 +205,21 @@ function GridOverlay({ points, maxC, gridStep, centerLat, centerLon }) {
           ctx.font = `${axFontSize}px sans-serif`;
           ctx.textAlign = "center";
           ctx.textBaseline = "middle";
-          ctx.fillText(dxStr, screenX, screenY + labelH / 2);
+          ctx.fillText(label, screenX, screenY + labelH / 2);
         }
         // подпись X→
         ctx.fillStyle = "#000";
         ctx.font = `bold ${axFontSize + 1}px sans-serif`;
         ctx.textAlign = "right";
-        ctx.fillText("Расст. X, м→", size.x - 6, maxScreenY + half + labelH / 2 + 2);
+        ctx.fillText("X, м →", size.x - 6, maxScreenY + half + labelH / 2 + 2);
 
-        // Y-ось (слева)
-        const axisLabelW = Math.min(cellPx * 0.85, 40);
-        for (const [dyStr, screenY] of Object.entries(yAxis)) {
+        // Y-ось (слева) — показываем расстояние от источника
+        const axisLabelW = Math.max(Math.min(cellPx * 0.85, 40), 36);
+        for (const dy of filteredY) {
+          const screenY = yAxis[dy];
+          if (screenY == null) continue;
           const screenX = minScreenX - half - 2;
+          const label = String(dy);
           ctx.fillStyle = "rgba(255,220,0,0.95)";
           ctx.fillRect(screenX - axisLabelW, screenY - labelH / 2, axisLabelW, labelH);
           ctx.strokeStyle = "#333";
@@ -204,13 +229,13 @@ function GridOverlay({ points, maxC, gridStep, centerLat, centerLon }) {
           ctx.font = `${axFontSize}px sans-serif`;
           ctx.textAlign = "center";
           ctx.textBaseline = "middle";
-          ctx.fillText(dyStr, screenX - axisLabelW / 2, screenY);
+          ctx.fillText(label, screenX - axisLabelW / 2, screenY);
         }
         // подпись ↑Y
         ctx.fillStyle = "#000";
         ctx.font = `bold ${axFontSize + 1}px sans-serif`;
         ctx.textAlign = "center";
-        ctx.fillText("↑Расст. Y, м", minScreenX - half - axisLabelW / 2 - 2, 14);
+        ctx.fillText("↑ Y, м", minScreenX - half - axisLabelW / 2 - 2, 14);
       }
     }
 
@@ -377,6 +402,125 @@ function IsolineOverlay({ points, maxC, pdk }) {
   return null;
 }
 
+// ─── Роза ветров ─────────────────────────────────────────────────────────────
+function WindRose({ windDirection, windSpeed }) {
+  const size = 90;
+  const center = size / 2;
+  const r = 32;
+
+  // windDirection — откуда дует (метео), стрелка показывает КУДА дует
+  const arrowAngle = (windDirection || 0); // откуда дует — стрелка указывает ОТКУДА
+  const arrowRad = (arrowAngle - 90) * Math.PI / 180;
+  const toRad = (arrowAngle + 90) * Math.PI / 180; // куда дует
+
+  const labels = [
+    { text: "С", angle: -90 },
+    { text: "В", angle: 0 },
+    { text: "Ю", angle: 90 },
+    { text: "З", angle: 180 },
+  ];
+
+  return (
+    <div style={{
+      position: "absolute", top: 56, left: 10, zIndex: 1000,
+      background: "rgba(255,255,255,0.93)", borderRadius: 8,
+      padding: 4, boxShadow: "0 2px 6px rgba(0,0,0,0.25)",
+      width: size, height: size + 18, textAlign: "center",
+    }}>
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+        {/* Круг */}
+        <circle cx={center} cy={center} r={r + 4} fill="none" stroke="#CBD5E1" strokeWidth="1" />
+        <circle cx={center} cy={center} r={r - 8} fill="none" stroke="#E2E8F0" strokeWidth="0.5" />
+
+        {/* Засечки и буквы */}
+        {labels.map((l) => {
+          const rad = l.angle * Math.PI / 180;
+          const x1 = center + Math.cos(rad) * (r - 2);
+          const y1 = center + Math.sin(rad) * (r - 2);
+          const x2 = center + Math.cos(rad) * (r + 4);
+          const y2 = center + Math.sin(rad) * (r + 4);
+          const tx = center + Math.cos(rad) * (r + 12);
+          const ty = center + Math.sin(rad) * (r + 12);
+          return (
+            <g key={l.text}>
+              <line x1={x1} y1={y1} x2={x2} y2={y2} stroke="#333" strokeWidth="1.5" />
+              <text x={tx} y={ty} textAnchor="middle" dominantBaseline="central"
+                fontSize="10" fontWeight="bold" fill="#1E293B">{l.text}</text>
+            </g>
+          );
+        })}
+
+        {/* Стрелка — откуда дует */}
+        <line
+          x1={center + Math.cos(toRad) * (r - 10)}
+          y1={center + Math.sin(toRad) * (r - 10)}
+          x2={center + Math.cos(arrowRad) * (r - 10)}
+          y2={center + Math.sin(arrowRad) * (r - 10)}
+          stroke="#DC2626" strokeWidth="2.5"
+        />
+        {/* Наконечник стрелки (куда дует) */}
+        {(() => {
+          const tipX = center + Math.cos(toRad) * (r - 10);
+          const tipY = center + Math.sin(toRad) * (r - 10);
+          const a1 = toRad - 0.4;
+          const a2 = toRad + 0.4;
+          const sz = 8;
+          return (
+            <polygon
+              points={`${tipX},${tipY} ${tipX - Math.cos(a1) * sz},${tipY - Math.sin(a1) * sz} ${tipX - Math.cos(a2) * sz},${tipY - Math.sin(a2) * sz}`}
+              fill="#DC2626"
+            />
+          );
+        })()}
+
+        {/* Центр */}
+        <circle cx={center} cy={center} r="3" fill="#1E293B" />
+      </svg>
+      <div style={{ fontSize: 9, color: "#64748b", marginTop: -2 }}>
+        {windSpeed} м/с | {windDirection}°
+      </div>
+    </div>
+  );
+}
+
+// ─── Заголовок карты ─────────────────────────────────────────────────────────
+function MapTitle({ enterprise, substance, gridRadius }) {
+  const name = enterprise?.name || "";
+  const subName = substance?.name || "";
+  const scale = gridRadius ? `Масштаб 1:${Math.round(gridRadius * 2 * 3)}` : "";
+
+  if (!name && !subName) return null;
+
+  return (
+    <div style={{
+      position: "absolute", top: 10, left: "50%", transform: "translateX(-50%)",
+      zIndex: 999, background: "rgba(255,255,255,0.93)",
+      borderRadius: 8, padding: "6px 16px",
+      boxShadow: "0 2px 6px rgba(0,0,0,0.2)",
+      textAlign: "center", maxWidth: "60%",
+    }}>
+      {name && (
+        <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
+          Уровень загрязнения атмосферы выбросами
+        </div>
+      )}
+      {name && (
+        <div style={{ fontSize: 12, fontWeight: 600, color: "#1E293B" }}>
+          {name}
+        </div>
+      )}
+      {subName && (
+        <div style={{ fontSize: 11, color: "#64748b" }}>
+          Вещество: {subName}
+        </div>
+      )}
+      {scale && (
+        <div style={{ fontSize: 10, color: "#94a3b8" }}>{scale}</div>
+      )}
+    </div>
+  );
+}
+
 // ─── Кнопки переключения режима ───────────────────────────────────────────────
 function ViewToggle({ mode, onChange }) {
   const btnBase = {
@@ -450,6 +594,7 @@ const TILES = {
 export default function MapView({
   sources, result, pickingIndex, onPick, onSourceMove, cityCenter,
   viewMode, onViewModeChange, gridStep, gridRadius, currentPdk,
+  meteo, enterprise, substance,
 }) {
   const [mapType, setMapType] = useState("satellite");
   const [bgImage, setBgImage] = useState(null);
@@ -584,6 +729,16 @@ export default function MapView({
 
       {/* Кнопки переключения */}
       {result && <ViewToggle mode={viewMode} onChange={onViewModeChange} />}
+
+      {/* Роза ветров */}
+      {result && meteo && (
+        <WindRose windDirection={meteo.wind_direction} windSpeed={meteo.wind_speed} />
+      )}
+
+      {/* Заголовок */}
+      {result && viewMode === "grid" && (
+        <MapTitle enterprise={enterprise} substance={substance} gridRadius={gridRadius} />
+      )}
 
       {/* Тип карты + загрузка подложки */}
       <div style={{
