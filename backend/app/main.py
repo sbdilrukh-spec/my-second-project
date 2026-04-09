@@ -1,7 +1,11 @@
 from fastapi import FastAPI, HTTPException, Query, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, PlainTextResponse
+from pydantic import BaseModel
+from typing import Optional
 import io
+import json
+import os
 import openpyxl
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 
@@ -12,6 +16,48 @@ from .pdf_export import generate_pdf
 from .substances import SUBSTANCES
 from .tables import generate_pdv_tables, generate_ovos_tables
 from .import_sources import parse_csv, parse_excel, generate_template_csv, generate_template_xlsx
+
+
+# ---------------------------------------------------------------------------
+# Persistence helpers for custom substances
+# ---------------------------------------------------------------------------
+
+CUSTOM_SUBSTANCES_PATH = os.path.join(os.path.dirname(__file__), "custom_substances.json")
+
+
+def _load_custom_substances() -> list:
+    """Load custom substances from JSON file."""
+    if not os.path.exists(CUSTOM_SUBSTANCES_PATH):
+        return []
+    try:
+        with open(CUSTOM_SUBSTANCES_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return []
+
+
+def _save_custom_substances(data: list):
+    """Save custom substances to JSON file."""
+    with open(CUSTOM_SUBSTANCES_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _get_all_substances() -> list:
+    """Merge built-in SUBSTANCES with custom ones. Custom override built-in by code."""
+    custom = _load_custom_substances()
+    custom_codes = {s["code"] for s in custom}
+    merged = [s for s in SUBSTANCES if s["code"] not in custom_codes]
+    merged.extend(custom)
+    return merged
+
+
+class SubstanceBody(BaseModel):
+    code: str
+    name: str
+    pdk_mr: Optional[float] = None
+    pdk_ss: Optional[float] = None
+    hazard_class: Optional[int] = None
+    F: float = 1.0
 
 app = FastAPI(title="ОНД-86 API", version="1.0.0")
 
@@ -45,12 +91,89 @@ def get_cities():
 
 
 # ---------------------------------------------------------------------------
-# GET /api/substances  — справочник веществ
+# GET /api/substances  — справочник веществ (built-in + custom merged)
 # ---------------------------------------------------------------------------
 
 @app.get("/api/substances")
 def get_substances():
-    return SUBSTANCES
+    return _get_all_substances()
+
+
+# ---------------------------------------------------------------------------
+# POST /api/substances  — добавить новое вещество
+# ---------------------------------------------------------------------------
+
+@app.post("/api/substances")
+def add_substance(body: SubstanceBody):
+    all_subs = _get_all_substances()
+    if any(s["code"] == body.code for s in all_subs):
+        raise HTTPException(status_code=409, detail=f"Вещество с кодом '{body.code}' уже существует")
+
+    custom = _load_custom_substances()
+    new_item = body.model_dump()
+    new_item["custom"] = True
+    custom.append(new_item)
+    _save_custom_substances(custom)
+    return new_item
+
+
+# ---------------------------------------------------------------------------
+# PUT /api/substances/{code}  — обновить вещество
+# ---------------------------------------------------------------------------
+
+@app.put("/api/substances/{code}")
+def update_substance(code: str, body: SubstanceBody):
+    custom = _load_custom_substances()
+
+    # Check if it is a built-in substance being edited for the first time
+    builtin = next((s for s in SUBSTANCES if s["code"] == code), None)
+    existing_custom = next((s for s in custom if s["code"] == code), None)
+
+    # If code is being changed, make sure new code doesn't conflict
+    if body.code != code:
+        all_subs = _get_all_substances()
+        if any(s["code"] == body.code for s in all_subs if s["code"] != code):
+            raise HTTPException(status_code=409, detail=f"Вещество с кодом '{body.code}' уже существует")
+
+    updated = body.model_dump()
+    updated["custom"] = True
+
+    if existing_custom:
+        # Update existing custom entry
+        custom = [updated if s["code"] == code else s for s in custom]
+    elif builtin:
+        # Override a built-in substance — add to custom list
+        custom.append(updated)
+    else:
+        raise HTTPException(status_code=404, detail=f"Вещество с кодом '{code}' не найдено")
+
+    _save_custom_substances(custom)
+    return updated
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/substances/{code}  — удалить вещество
+# ---------------------------------------------------------------------------
+
+@app.delete("/api/substances/{code}")
+def delete_substance(code: str):
+    custom = _load_custom_substances()
+    builtin = next((s for s in SUBSTANCES if s["code"] == code), None)
+    existing_custom = next((s for s in custom if s["code"] == code), None)
+
+    if not builtin and not existing_custom:
+        raise HTTPException(status_code=404, detail=f"Вещество с кодом '{code}' не найдено")
+
+    if builtin and not existing_custom:
+        raise HTTPException(
+            status_code=400,
+            detail="Нельзя удалить встроенное вещество. Его можно только редактировать."
+        )
+
+    # Remove from custom list
+    custom = [s for s in custom if s["code"] != code]
+    _save_custom_substances(custom)
+    return {"ok": True, "deleted": code}
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +306,20 @@ def _determine_stability(wind_speed: float, cloud_cover: float, is_day: bool) ->
                 return "D"
 
 
+def _grid_kwargs(grid) -> dict:
+    """Формирует kwargs для compute_grid из GridInput (совместимость старый/новый формат)."""
+    if grid.x_length is not None:
+        return dict(
+            x_length=grid.x_length,
+            y_length=grid.y_length,
+            grid_step=grid.step,
+            source_offset_x=grid.source_offset_x,
+            source_offset_y=grid.source_offset_y,
+        )
+    # Старый формат (radius)
+    return dict(grid_radius=grid.radius, grid_step=grid.step)
+
+
 # ---------------------------------------------------------------------------
 # POST /api/calculate  — расчёт поля концентраций
 # ---------------------------------------------------------------------------
@@ -201,8 +338,7 @@ def calculate(req: CalculationRequest):
         sources=req.sources,
         meteo=req.meteo,
         city_data=city_data,
-        grid_radius=req.grid.radius,
-        grid_step=req.grid.step,
+        **_grid_kwargs(req.grid),
     )
 
     # Максимум
@@ -257,8 +393,7 @@ def get_tables(req: CalculationRequest):
         sources=req.sources,
         meteo=req.meteo,
         city_data=city_data,
-        grid_radius=req.grid.radius,
-        grid_step=req.grid.step,
+        **_grid_kwargs(req.grid),
     )
 
     max_idx = int(total_mg.argmax())
@@ -292,8 +427,7 @@ def export_pdf(req: CalculationRequest):
         sources=req.sources,
         meteo=req.meteo,
         city_data=city_data,
-        grid_radius=req.grid.radius,
-        grid_step=req.grid.step,
+        **_grid_kwargs(req.grid),
     )
 
     max_idx = int(total_mg.argmax())
@@ -338,8 +472,7 @@ def export_excel(req: CalculationRequest):
         sources=req.sources,
         meteo=req.meteo,
         city_data=city_data,
-        grid_radius=req.grid.radius,
-        grid_step=req.grid.step,
+        **_grid_kwargs(req.grid),
     )
 
     max_idx = int(total_mg.argmax())

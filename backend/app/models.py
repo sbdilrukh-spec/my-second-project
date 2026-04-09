@@ -32,8 +32,14 @@ class MeteoInput(BaseModel):
 
 
 class GridInput(BaseModel):
-    radius: float    # Радиус расчётной области, м
-    step: float      # Шаг сетки, м
+    # Новая система: прямоугольная сетка с началом координат в нижнем левом углу
+    x_length: float = 7000       # Длина по X, м
+    y_length: float = 7000       # Длина по Y, м
+    step: float = 500            # Шаг сетки, 100-500 м
+    source_offset_x: float = 3500  # Положение источника от X₀, м
+    source_offset_y: float = 3500  # Положение источника от Y₀, м
+    # Обратная совместимость со старыми проектами
+    radius: Optional[float] = None
 
 
 class SubstanceInput(BaseModel):

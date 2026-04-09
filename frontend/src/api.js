@@ -12,6 +12,21 @@ export async function fetchSubstances() {
   return res.data;
 }
 
+export async function addSubstance(substance) {
+  const res = await axios.post(`${BASE}/substances`, substance);
+  return res.data;
+}
+
+export async function updateSubstance(code, substance) {
+  const res = await axios.put(`${BASE}/substances/${encodeURIComponent(code)}`, substance);
+  return res.data;
+}
+
+export async function deleteSubstance(code) {
+  const res = await axios.delete(`${BASE}/substances/${encodeURIComponent(code)}`);
+  return res.data;
+}
+
 export async function fetchWeather(lat, lon) {
   const res = await axios.get(`${BASE}/weather`, { params: { lat, lon } });
   return res.data;

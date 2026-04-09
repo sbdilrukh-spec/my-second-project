@@ -11,6 +11,7 @@ import ImportPanel from "./components/ImportPanel.jsx";
 import MapView from "./components/MapView.jsx";
 import ResultsPanel from "./components/ResultsPanel.jsx";
 import TableInput from "./components/TableInput.jsx";
+import SubstanceEditor from "./components/SubstanceEditor.jsx";
 
 const DEFAULT_METEO = {
   city: "Ташкент",
@@ -22,9 +23,26 @@ const DEFAULT_METEO = {
 };
 
 const DEFAULT_GRID = {
-  radius: 3000,
-  step: 100,
+  x_length: 7000,
+  y_length: 7000,
+  step: 500,
+  source_offset_x: 3500,
+  source_offset_y: 3500,
 };
+
+// Миграция старых проектов (radius -> x_length/y_length)
+function migrateGrid(g) {
+  if (g && g.radius && !g.x_length) {
+    return {
+      x_length: g.radius * 2,
+      y_length: g.radius * 2,
+      step: g.step || 500,
+      source_offset_x: g.radius,
+      source_offset_y: g.radius,
+    };
+  }
+  return g;
+}
 
 export default function App() {
   const [lang, setLang] = useState("ru");
@@ -38,7 +56,7 @@ export default function App() {
   const [cities, setCities] = useState([]);
   const [substances, setSubstances] = useState([]);
   const [meteo, setMeteo] = useState(savedProject?.meteo || DEFAULT_METEO);
-  const [grid, setGrid] = useState(savedProject?.grid || DEFAULT_GRID);
+  const [grid, setGrid] = useState(migrateGrid(savedProject?.grid) || DEFAULT_GRID);
   const [selectedSubstance, setSelectedSubstance] = useState(savedProject?.selectedSubstance || null);
   const [sources, setSources] = useState(savedProject?.sources || [createDefaultSource(41.2995, 69.2401, 0)]);
   const [enterprise, setEnterprise] = useState(savedProject?.enterprise || DEFAULT_ENTERPRISE);
@@ -103,6 +121,15 @@ export default function App() {
   }, [customSubstances]);
 
   const allSubstances = [...substances, ...customSubstances];
+
+  // Substance editor modal
+  const [showSubstanceEditor, setShowSubstanceEditor] = useState(false);
+
+  const reloadSubstances = useCallback(() => {
+    fetchSubstances()
+      .then(setSubstances)
+      .catch(() => {});
+  }, []);
 
   // Центр карты
   const cityCenter = (() => {
@@ -301,15 +328,78 @@ export default function App() {
       <aside className="sidebar">
         <div className="sidebar-header">
           <h1 className="app-title">{t.appTitle}</h1>
-          <button
-            className="btn-lang"
-            onClick={() => setLang(lang === "ru" ? "uz" : "ru")}
-          >
-            {t.lang}
-          </button>
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <button
+              className="btn-editor"
+              onClick={() => setShowSubstanceEditor(true)}
+              title={t.substanceEditor}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M4 19.5A2.5 2.5 0 016.5 17H20"/>
+                <path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/>
+              </svg>
+              {t.substanceEditor}
+            </button>
+            <button
+              className="btn-lang"
+              onClick={() => setLang(lang === "ru" ? "uz" : "ru")}
+            >
+              {t.lang}
+            </button>
+          </div>
         </div>
 
         <div className="sidebar-scroll">
+          {/* ---- Вещество и ПДК (общее для всех источников) ---- */}
+          <div className="panel-section">
+            <h3 className="section-title">{t.substance}</h3>
+            <div className="field-row">
+              <label>{t.selectSubstance}</label>
+              <select
+                value={selectedSubstance?.code || ""}
+                onChange={(e) => {
+                  const code = e.target.value;
+                  if (code === "") { setSelectedSubstance(null); return; }
+                  const found = allSubstances.find((s) => s.code === code);
+                  if (found) {
+                    setSelectedSubstance(found);
+                    // Применить ПДК ко всем источникам
+                    if (found.pdk_mr != null) {
+                      setSources(prev => prev.map(s => ({ ...s, pdk: found.pdk_mr, substance: found })));
+                    }
+                  }
+                }}
+                style={{ fontSize: 12 }}
+              >
+                <option value="">-- {t.selectSubstance} --</option>
+                {allSubstances.map((s) => (
+                  <option key={s.code} value={s.code}>
+                    {s.code} — {s.name} (ПДК: {s.pdk_mr ?? "—"})
+                  </option>
+                ))}
+              </select>
+            </div>
+            {selectedSubstance && (
+              <div style={{ fontSize: 11, color: "#64748b", padding: "2px 0 0 4px" }}>
+                {t.hazardClass}: {selectedSubstance.hazard_class ?? "—"} | {t.pdkSs}: {selectedSubstance.pdk_ss ?? "—"}
+              </div>
+            )}
+            <div className="field-row">
+              <label>{t.pdkMr}</label>
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                value={selectedSubstance?.pdk_mr ?? 0.5}
+                onChange={(e) => {
+                  const val = parseFloat(e.target.value) || 0.5;
+                  setSelectedSubstance(prev => prev ? { ...prev, pdk_mr: val } : { code: "", name: "", pdk_mr: val });
+                  setSources(prev => prev.map(s => ({ ...s, pdk: val })));
+                }}
+              />
+            </div>
+          </div>
+
           {/* ---- Источники ---- */}
           <div className="panel-section">
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 4 }}>
@@ -369,17 +459,33 @@ export default function App() {
             {/* ---- Импорт CSV/Excel ---- */}
             <ImportPanel
               onImport={(imported) => {
-                setSources((prev) => [...prev, ...imported.map((s, i) => ({
-                  name: s.name || `Импорт ${prev.length + i + 1}`,
-                  lat: s.lat || (cities.find(c => c.name === meteo.city)?.lat ?? 41.3),
-                  lon: s.lon || (cities.find(c => c.name === meteo.city)?.lon ?? 69.24),
-                  height: s.height || 30,
-                  diameter: s.diameter || 1.0,
-                  velocity: s.velocity || 8.0,
-                  temperature: s.temperature || 120,
-                  emission_gs: s.emission_gs || null,
-                  emission_ty: s.emission_ty || null,
-                }))]);
+                const city = cities.find(c => c.name === meteo.city);
+                const centerLat = city?.lat ?? 41.3;
+                const centerLon = city?.lon ?? 69.24;
+                const spacing = 0.002; // ~200м между источниками
+                const cols = Math.ceil(Math.sqrt(imported.length));
+
+                setSources((prev) => [...prev, ...imported.map((s, i) => {
+                  // Авторасстановка по сетке если нет координат
+                  const row = Math.floor(i / cols);
+                  const col = i % cols;
+                  const autoLat = centerLat + (row - Math.floor(cols / 2)) * spacing;
+                  const autoLon = centerLon + (col - Math.floor(cols / 2)) * spacing;
+
+                  return {
+                    name: s.name || `Источник ${prev.length + i + 1}`,
+                    lat: s.lat || autoLat,
+                    lon: s.lon || autoLon,
+                    height: s.height || 30,
+                    diameter: s.diameter || 1.0,
+                    velocity: s.velocity || 8.0,
+                    temperature: s.temperature || 120,
+                    emission_gs: s.emission_gs || null,
+                    emission_ty: s.emission_ty || null,
+                    pdk: selectedSubstance?.pdk_mr ?? 0.5,
+                    substance: selectedSubstance || null,
+                  };
+                })]);
               }}
               t={t}
             />
@@ -405,22 +511,57 @@ export default function App() {
           {/* ---- Расчётная область ---- */}
           <div className="panel-section">
             <h3 className="section-title">{t.grid}</h3>
-            <div className="field-row">
-              <label>{t.radius}</label>
-              <input
-                type="number" step="100" min="100"
-                value={grid.radius}
-                onChange={(e) => setGrid({ ...grid, radius: parseFloat(e.target.value) || 1000 })}
-              />
+            <div style={{ display: "flex", gap: 6 }}>
+              <div className="field-row" style={{ flex: 1 }}>
+                <label>Длина X, м</label>
+                <input
+                  type="number" step="500" min="500"
+                  value={grid.x_length}
+                  onChange={(e) => setGrid({ ...grid, x_length: parseFloat(e.target.value) || 7000 })}
+                />
+              </div>
+              <div className="field-row" style={{ flex: 1 }}>
+                <label>Длина Y, м</label>
+                <input
+                  type="number" step="500" min="500"
+                  value={grid.y_length}
+                  onChange={(e) => setGrid({ ...grid, y_length: parseFloat(e.target.value) || 7000 })}
+                />
+              </div>
             </div>
             <div className="field-row">
-              <label>{t.step}</label>
+              <label>{t.step} (100-500 м)</label>
               <input
-                type="number" step="10" min="10"
+                type="number" step="50" min="100" max="500"
                 value={grid.step}
-                onChange={(e) => setGrid({ ...grid, step: parseFloat(e.target.value) || 50 })}
+                onChange={(e) => setGrid({ ...grid, step: Math.max(100, Math.min(500, parseFloat(e.target.value) || 500)) })}
               />
             </div>
+            <div style={{ display: "flex", gap: 6 }}>
+              <div className="field-row" style={{ flex: 1 }}>
+                <label>Источник X₀, м</label>
+                <input
+                  type="number" step="100" min="0"
+                  value={grid.source_offset_x}
+                  onChange={(e) => setGrid({ ...grid, source_offset_x: parseFloat(e.target.value) || 0 })}
+                />
+              </div>
+              <div className="field-row" style={{ flex: 1 }}>
+                <label>Источник Y₀, м</label>
+                <input
+                  type="number" step="100" min="0"
+                  value={grid.source_offset_y}
+                  onChange={(e) => setGrid({ ...grid, source_offset_y: parseFloat(e.target.value) || 0 })}
+                />
+              </div>
+            </div>
+            <button
+              className="btn-secondary btn-sm"
+              style={{ width: "100%", marginTop: 4, fontSize: 11 }}
+              onClick={() => setGrid({ ...grid, source_offset_x: grid.x_length / 2, source_offset_y: grid.y_length / 2 })}
+            >
+              Источник по центру
+            </button>
           </div>
 
           {/* ---- Сохранение / загрузка проекта ---- */}
@@ -498,13 +639,26 @@ export default function App() {
           viewMode={viewMode}
           onViewModeChange={setViewMode}
           gridStep={grid.step}
-          gridRadius={grid.radius}
+          gridXLength={grid.x_length}
+          gridYLength={grid.y_length}
+          sourceOffsetX={grid.source_offset_x}
+          sourceOffsetY={grid.source_offset_y}
           currentPdk={Math.min(...sources.map(s => s.pdk ?? 0.5))}
           meteo={meteo}
           enterprise={enterprise}
           substance={sources[0]?.substance || selectedSubstance}
         />
       </main>
+
+      {/* ===== Справочник веществ ===== */}
+      {showSubstanceEditor && (
+        <SubstanceEditor
+          substances={allSubstances}
+          onSubstancesChanged={reloadSubstances}
+          onClose={() => setShowSubstanceEditor(false)}
+          t={t}
+        />
+      )}
     </div>
   );
 }

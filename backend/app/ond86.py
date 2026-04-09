@@ -212,9 +212,15 @@ def _compute_single_direction(sources, sigma_coeff, A, Ta, wd_rad, grid_lats, gr
     return total_c, src_results
 
 
-def compute_grid(sources, meteo, city_data: dict, grid_radius: float, grid_step: float):
+def compute_grid(sources, meteo, city_data: dict,
+                  grid_radius: float = None, grid_step: float = 500,
+                  x_length: float = None, y_length: float = None,
+                  source_offset_x: float = None, source_offset_y: float = None):
     """
     Рассчитывает приземные концентрации на регулярной сетке.
+
+    Новая система координат: начало (0,0) в нижнем левом углу.
+    Источник расположен в (source_offset_x, source_offset_y).
 
     Режимы:
         wind_mode="360"    — 36 направлений (шаг 10°), MAX в каждой точке (ОВОС)
@@ -234,14 +240,41 @@ def compute_grid(sources, meteo, city_data: dict, grid_radius: float, grid_step:
     center_lat = sum(s.lat for s in sources) / len(sources)
     center_lon = sum(s.lon for s in sources) / len(sources)
 
-    n_steps = int(grid_radius / grid_step)
-    offsets = np.arange(-n_steps, n_steps + 1) * grid_step  # [-radius, ..., 0, ..., radius]
+    # Обратная совместимость: если передан radius, конвертируем в x_length/y_length
+    if x_length is None and grid_radius is not None:
+        x_length = grid_radius * 2
+        y_length = grid_radius * 2
+        source_offset_x = grid_radius
+        source_offset_y = grid_radius
+    elif x_length is None:
+        x_length = 7000
+        y_length = 7000
+        source_offset_x = 3500
+        source_offset_y = 3500
 
-    dx_e_2d, dy_n_2d = np.meshgrid(offsets, offsets)   # shape (2N+1, 2N+1)
+    if y_length is None:
+        y_length = x_length
+    if source_offset_x is None:
+        source_offset_x = x_length / 2
+    if source_offset_y is None:
+        source_offset_y = y_length / 2
 
     lat_rad_center = center_lat * np.pi / 180.0
-    grid_lats = (center_lat + dy_n_2d / 111_000.0).flatten()
-    grid_lons = (center_lon + dx_e_2d / (111_000.0 * np.cos(lat_rad_center))).flatten()
+
+    # Начало координат (нижний левый угол) в географических координатах
+    origin_lat = center_lat - source_offset_y / 111_000.0
+    origin_lon = center_lon - source_offset_x / (111_000.0 * np.cos(lat_rad_center))
+
+    # Сетка от 0 до x_length / y_length
+    n_x = int(x_length / grid_step) + 1
+    n_y = int(y_length / grid_step) + 1
+    x_offsets = np.arange(n_x) * grid_step  # [0, step, 2*step, ..., x_length]
+    y_offsets = np.arange(n_y) * grid_step  # [0, step, 2*step, ..., y_length]
+
+    dx_e_2d, dy_n_2d = np.meshgrid(x_offsets, y_offsets)
+
+    grid_lats = (origin_lat + dy_n_2d / 111_000.0).flatten()
+    grid_lons = (origin_lon + dx_e_2d / (111_000.0 * np.cos(lat_rad_center))).flatten()
 
     if wind_mode == "360":
         # ---------- Полный обзор 360° ----------

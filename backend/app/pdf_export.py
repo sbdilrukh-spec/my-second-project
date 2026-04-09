@@ -104,23 +104,26 @@ TABLE_STYLE = TableStyle([
 # График поля концентраций (matplotlib)
 # ---------------------------------------------------------------------------
 
-def _make_concentration_plot(points_data: list, grid_step: float = 200,
-                              title: str = "Карта рассеивания ЗВ в приземном слое") -> io.BytesIO:
+def _make_concentration_plot(points_data: list, grid_step: float = 500,
+                              title: str = "Карта рассеивания ЗВ в приземном слое",
+                              grid_params: dict = None) -> io.BytesIO:
     """
     Сеточная карта рассеивания в стиле ОНД-86:
     каждая ячейка содержит числовое значение концентрации.
+    Начало координат (0,0) в нижнем левом углу.
     """
     lats = np.array([p["lat"] for p in points_data])
     lons = np.array([p["lon"] for p in points_data])
     conc = np.array([p["c"] for p in points_data])
 
-    center_lat = float(np.mean(lats))
-    center_lon = float(np.mean(lons))
-    lat_rad = center_lat * np.pi / 180
+    # Начало координат — минимальные lat/lon (нижний левый угол)
+    origin_lat = float(np.min(lats))
+    origin_lon = float(np.min(lons))
+    lat_rad = origin_lat * np.pi / 180
 
-    # Переводим в метры от центра
-    dx_e = (lons - center_lon) * 111000.0 * np.cos(lat_rad)
-    dy_n = (lats - center_lat) * 111000.0
+    # Переводим в метры от начала координат (всё >= 0)
+    dx_e = (lons - origin_lon) * 111000.0 * np.cos(lat_rad)
+    dy_n = (lats - origin_lat) * 111000.0
 
     # Округляем к сетке
     dx_r = np.round(dx_e / grid_step).astype(int) * int(grid_step)
@@ -140,13 +143,15 @@ def _make_concentration_plot(points_data: list, grid_step: float = 200,
 
     max_c = float(conc.max()) if conc.max() > 0 else 1.0
 
-    # Адаптивный размер графика
-    cell_inch = max(0.35, min(0.7, 12.0 / max(n_x, n_y)))
-    fig_w = max(8, n_x * cell_inch + 1.5)
-    fig_h = max(6, n_y * cell_inch + 1.5)
+    # Адаптивный размер графика с правильным соотношением сторон
+    x_range = unique_x[-1] - unique_x[0] + grid_step if unique_x else grid_step
+    y_range = unique_y[-1] - unique_y[0] + grid_step if unique_y else grid_step
+    aspect = y_range / x_range if x_range > 0 else 1.0
+    fig_w = max(8, min(16, n_x * 0.5 + 2))
+    fig_h = max(6, fig_w * aspect)
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
-    font_size = max(4, min(8, int(cell_inch * 12)))
+    font_size = max(4, min(8, int(fig_w / n_x * 10))) if n_x > 0 else 6
 
     for yi, y_val in enumerate(unique_y):
         for xi, x_val in enumerate(unique_x):
@@ -175,7 +180,7 @@ def _make_concentration_plot(points_data: list, grid_step: float = 200,
 
             if c_val > 0:
                 ax.text(
-                    x_val, y_val, f"{c_val:.4f}",
+                    x_val, y_val, f"{c_val:.2f}",
                     ha="center", va="center", fontsize=font_size,
                     fontweight="bold" if is_max else "normal",
                     color="#CC0000" if is_max else "#000000",
@@ -184,30 +189,37 @@ def _make_concentration_plot(points_data: list, grid_step: float = 200,
     ax.set_xlim(unique_x[0] - grid_step / 2, unique_x[-1] + grid_step / 2)
     ax.set_ylim(unique_y[0] - grid_step / 2, unique_y[-1] + grid_step / 2)
     ax.set_aspect("equal")
-    ax.set_xlabel("Расстояние X, м", fontsize=9)
-    ax.set_ylabel("Расстояние Y, м", fontsize=9)
+    ax.set_xlabel("X, м", fontsize=9)
+    ax.set_ylabel("Y, м", fontsize=9)
 
-    # Маркер источника (0, 0)
-    if 0 in unique_x and 0 in unique_y:
-        ax.plot(0, 0, marker="^", color="#DC2626", markersize=10, zorder=5)
-        ax.text(0, -grid_step * 0.35, "Источник", ha="center", va="top",
-                fontsize=font_size + 1, color="#DC2626", fontweight="bold")
+    # Маркер источника
+    src_x = grid_params.get("source_offset_x", x_range / 2) if grid_params else x_range / 2
+    src_y = grid_params.get("source_offset_y", y_range / 2) if grid_params else y_range / 2
+    ax.plot(src_x, src_y, marker="^", color="#DC2626", markersize=10, zorder=5)
+    ax.text(src_x, src_y - grid_step * 0.35, "Источник", ha="center", va="top",
+            fontsize=font_size + 1, color="#DC2626", fontweight="bold")
+
     ax.set_title(title, fontsize=11, fontweight="bold")
 
-    # Жёлтые метки осей (расстояние от источника — всегда положительное)
+    # Жёлтые метки осей (координаты от начала: 0, 500, 1000, ...)
     ax.set_xticks(unique_x)
-    ax.set_xticklabels([str(abs(v)) for v in unique_x])
+    ax.set_xticklabels([str(v) for v in unique_x])
     ax.set_yticks(unique_y)
-    ax.set_yticklabels([str(abs(v)) for v in unique_y])
+    ax.set_yticklabels([str(v) for v in unique_y])
     ax.tick_params(labelsize=font_size)
     for lbl in ax.get_xticklabels():
         lbl.set_bbox(dict(facecolor="#FFE000", edgecolor="#333", linewidth=0.5, pad=2))
     for lbl in ax.get_yticklabels():
         lbl.set_bbox(dict(facecolor="#FFE000", edgecolor="#333", linewidth=0.5, pad=2))
 
-    fig.tight_layout()
+    # Рамка вокруг всей области
+    ax.plot([unique_x[0] - grid_step/2, unique_x[-1] + grid_step/2, unique_x[-1] + grid_step/2, unique_x[0] - grid_step/2, unique_x[0] - grid_step/2],
+            [unique_y[0] - grid_step/2, unique_y[0] - grid_step/2, unique_y[-1] + grid_step/2, unique_y[-1] + grid_step/2, unique_y[0] - grid_step/2],
+            color="#000", linewidth=1.5, zorder=4)
+
+    fig.subplots_adjust(left=0.12, right=0.95, bottom=0.12, top=0.92)
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=130, bbox_inches="tight")
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight", pad_inches=0.3)
     plt.close(fig)
     buf.seek(0)
     return buf
@@ -354,9 +366,13 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
     story.append(Paragraph("5. Поле приземных концентраций", h1_style))
     points = result_data.get("points", [])
     if points:
-        grid_step = request_data.get("grid", {}).get("step", 200)
-        plot_buf = _make_concentration_plot(points, grid_step=grid_step)
-        img = RLImage(plot_buf, width=W, height=W * 0.75)
+        grid_data = request_data.get("grid", {})
+        grid_step = grid_data.get("step", 500)
+        x_len = grid_data.get("x_length", 7000)
+        y_len = grid_data.get("y_length", 7000)
+        aspect = y_len / x_len if x_len > 0 else 1.0
+        plot_buf = _make_concentration_plot(points, grid_step=grid_step, grid_params=grid_data)
+        img = RLImage(plot_buf, width=W, height=W * min(aspect, 1.2))
         story.append(img)
 
     doc.build(story)

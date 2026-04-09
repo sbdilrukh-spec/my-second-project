@@ -11,24 +11,36 @@ COLUMN_MAP = {
     # Название / номер
     "название": "name", "name": "name", "источник": "name", "source": "name",
     "№": "name", "номер": "name", "number": "name", "n": "name",
+    # Код вещества
+    "код вещества": "substance_code", "код": "substance_code",
+    "substance_code": "substance_code", "code": "substance_code",
+    # Название вещества
+    "название вещества": "substance_name", "вещество": "substance_name",
+    "substance": "substance_name", "substance_name": "substance_name",
     # Высота
     "высота": "height", "h": "height", "h, м": "height", "height": "height",
     "высота трубы": "height", "высота, м": "height",
+    "высота (h), м": "height", "высота (h)": "height",
     # Диаметр
     "диаметр": "diameter", "d": "diameter", "d, м": "diameter", "diameter": "diameter",
     "диаметр устья": "diameter",
+    "диаметр (d), м": "diameter", "диаметр (d)": "diameter",
     # Скорость
     "скорость": "velocity", "w0": "velocity", "w0, м/с": "velocity", "velocity": "velocity",
     "скорость выхода": "velocity",
+    "скорость (w0), м/с": "velocity", "скорость (w0)": "velocity",
     # Температура
     "температура": "temperature", "tг": "temperature", "tг, °c": "temperature",
     "temperature": "temperature", "температура газов": "temperature",
+    "температура (tг), °c": "temperature", "температура (tг)": "temperature",
     # Выброс г/с
     "выброс г/с": "emission_gs", "m": "emission_gs", "m, г/с": "emission_gs",
     "emission_gs": "emission_gs", "г/с": "emission_gs", "выброс": "emission_gs",
+    "выброс (m), г/с": "emission_gs", "выброс (m)": "emission_gs",
     # Выброс т/год
     "выброс т/год": "emission_ty", "m год": "emission_ty", "m, т/год": "emission_ty",
     "emission_ty": "emission_ty", "т/год": "emission_ty",
+    "выброс, т/год": "emission_ty",
     # Координаты
     "широта": "lat", "lat": "lat", "latitude": "lat",
     "долгота": "lon", "lon": "lon", "longitude": "lon", "lng": "lon",
@@ -71,6 +83,8 @@ def parse_csv(content: str) -> List[Dict[str, Any]]:
 
             if header in ("name",):
                 source[header] = val or f"Источник {row_idx - 1}"
+            elif header in ("substance_code", "substance_name"):
+                source[header] = val or None
             elif header in ("height", "diameter", "velocity", "temperature",
                            "emission_gs", "emission_ty", "lat", "lon"):
                 try:
@@ -117,6 +131,8 @@ def parse_excel(file_bytes: bytes) -> List[Dict[str, Any]]:
 
             if header in ("name",):
                 source[header] = str(val) if val else f"Источник {row_idx - 1}"
+            elif header in ("substance_code", "substance_name"):
+                source[header] = str(val) if val else None
             elif header in ("height", "diameter", "velocity", "temperature",
                            "emission_gs", "emission_ty", "lat", "lon"):
                 try:
@@ -157,7 +173,7 @@ def generate_template_xlsx() -> bytes:
     ws.title = "Источники"
 
     headers = [
-        "№", "Высота (H), м", "Диаметр (D), м",
+        "№", "Код вещества", "Название вещества", "Высота (H), м", "Диаметр (D), м",
         "Скорость (w0), м/с", "Температура (Tг), °C",
         "Выброс (M), г/с", "Выброс, т/год",
     ]
@@ -176,7 +192,7 @@ def generate_template_xlsx() -> bytes:
         cell.alignment = Alignment(horizontal="center", wrap_text=True)
         cell.border = thin_border
 
-    example = [1, 45, 1.2, 12.0, 180, 8.5, 268.06]
+    example = [1, "0301", "Азота диоксид (NO2)", 45, 1.2, 12.0, 180, 8.5, 268.06]
     for col, val in enumerate(example, 1):
         cell = ws.cell(row=2, column=col, value=val)
         cell.border = thin_border

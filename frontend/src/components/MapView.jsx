@@ -75,7 +75,7 @@ function CanvasHeatmap({ points, maxC }) {
 }
 
 // ─── Grid Overlay (ОНД-86 стиль) ─────────────────────────────────────────────
-function GridOverlay({ points, maxC, gridStep, centerLat, centerLon }) {
+function GridOverlay({ points, maxC, gridStep, originLat, originLon, xLength, yLength, sourceOffsetX, sourceOffsetY }) {
   const map = useMap();
 
   useEffect(() => {
@@ -89,16 +89,16 @@ function GridOverlay({ points, maxC, gridStep, centerLat, centerLon }) {
     // Вычислить размер ячейки в пикселях при текущем зуме
     function getCellPx() {
       const stepDeg = gridStep / 111000;
-      const p1 = map.latLngToContainerPoint([centerLat, centerLon]);
-      const p2 = map.latLngToContainerPoint([centerLat + stepDeg, centerLon]);
+      const p1 = map.latLngToContainerPoint([originLat, originLon]);
+      const p2 = map.latLngToContainerPoint([originLat + stepDeg, originLon]);
       return Math.max(4, Math.abs(p2.y - p1.y));
     }
 
-    // Смещение точки от центра сетки в метрах
+    // Смещение точки от начала координат (нижний левый угол) в метрах
     function offsetM(lat, lon) {
-      const lat_rad = centerLat * Math.PI / 180;
-      const dx = Math.round((lon - centerLon) * 111000 * Math.cos(lat_rad) / gridStep) * gridStep;
-      const dy = Math.round((lat - centerLat) * 111000 / gridStep) * gridStep;
+      const lat_rad = originLat * Math.PI / 180;
+      const dx = Math.round((lon - originLon) * 111000 * Math.cos(lat_rad) / gridStep) * gridStep;
+      const dy = Math.round((lat - originLat) * 111000 / gridStep) * gridStep;
       return { dx, dy };
     }
 
@@ -156,11 +156,11 @@ function GridOverlay({ points, maxC, gridStep, centerLat, centerLon }) {
           ctx.fillText(p.c.toFixed(4), px.x, px.y);
         }
 
-        // Собираем для осей (реальные смещения dx/dy в метрах)
+        // Собираем для осей (координаты от начала: 0, 500, 1000, ...)
         const xKey = Math.round(dx);
         const yKey = Math.round(dy);
-        xAxis[xKey] = px.x;
-        yAxis[yKey] = px.y;
+        if (xKey >= 0) xAxis[xKey] = px.x;
+        if (yKey >= 0) yAxis[yKey] = px.y;
         if (px.x < minScreenX) minScreenX = px.x;
         if (px.y > maxScreenY) maxScreenY = px.y;
       }
@@ -245,7 +245,7 @@ function GridOverlay({ points, maxC, gridStep, centerLat, centerLon }) {
       map.off("zoom zoomend moveend viewreset", draw);
       if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
     };
-  }, [points, maxC, gridStep, centerLat, centerLon, map]);
+  }, [points, maxC, gridStep, originLat, originLon, xLength, yLength, sourceOffsetX, sourceOffsetY, map]);
 
   return null;
 }
@@ -593,7 +593,8 @@ const TILES = {
 // ─── Главный компонент карты ──────────────────────────────────────────────────
 export default function MapView({
   sources, result, pickingIndex, onPick, onSourceMove, cityCenter,
-  viewMode, onViewModeChange, gridStep, gridRadius, currentPdk,
+  viewMode, onViewModeChange, gridStep, gridXLength, gridYLength,
+  sourceOffsetX, sourceOffsetY, currentPdk,
   meteo, enterprise, substance,
 }) {
   const [mapType, setMapType] = useState("satellite");
@@ -607,19 +608,24 @@ export default function MapView({
     lon: sources.reduce((s, src) => s + (src.lon || 0), 0) / sources.length,
   } : null;
 
+  // Начало координат (нижний левый угол) — вычисляется от центроида источников
+  const gridOrigin = gridCenter ? {
+    lat: gridCenter.lat - (sourceOffsetY || 3500) / 111000,
+    lon: gridCenter.lon - (sourceOffsetX || 3500) / (111000 * Math.cos(gridCenter.lat * Math.PI / 180)),
+  } : null;
+
   function handleFileUpload(e) {
     const file = e.target.files[0];
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (ev) => {
       setBgImage(ev.target.result);
-      const center = gridCenter || { lat: defaultCenter[0], lon: defaultCenter[1] };
-      const radiusM = gridRadius || 3000;
-      const dLat = radiusM / 111000;
-      const dLon = radiusM / (111000 * Math.cos(center.lat * Math.PI / 180));
+      const origin = gridOrigin || { lat: defaultCenter[0] - 0.03, lon: defaultCenter[1] - 0.03 };
+      const dLat = (gridYLength || 7000) / 111000;
+      const dLon = (gridXLength || 7000) / (111000 * Math.cos((origin.lat + dLat / 2) * Math.PI / 180));
       setBgBounds([
-        [center.lat - dLat, center.lon - dLon],
-        [center.lat + dLat, center.lon + dLon],
+        [origin.lat, origin.lon],
+        [origin.lat + dLat, origin.lon + dLon],
       ]);
       setMapType("none");
     };
@@ -665,13 +671,17 @@ export default function MapView({
       )}
 
       {/* Сетка ОНД-86 */}
-      {viewMode === "grid" && result?.points?.length > 0 && gridCenter && (
+      {viewMode === "grid" && result?.points?.length > 0 && gridOrigin && (
         <GridOverlay
           points={result.points}
           maxC={result.max_c || 1}
-          gridStep={gridStep || 100}
-          centerLat={gridCenter.lat}
-          centerLon={gridCenter.lon}
+          gridStep={gridStep || 500}
+          originLat={gridOrigin.lat}
+          originLon={gridOrigin.lon}
+          xLength={gridXLength || 7000}
+          yLength={gridYLength || 7000}
+          sourceOffsetX={sourceOffsetX || 3500}
+          sourceOffsetY={sourceOffsetY || 3500}
         />
       )}
 
