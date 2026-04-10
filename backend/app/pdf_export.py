@@ -3,6 +3,7 @@
 Использует reportlab + matplotlib.
 """
 
+import base64
 import io
 import os
 from datetime import datetime
@@ -374,6 +375,67 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
         plot_buf = _make_concentration_plot(points, grid_step=grid_step, grid_params=grid_data)
         img = RLImage(plot_buf, width=W, height=W * min(aspect, 1.2))
         story.append(img)
+
+    # --- 6. Снимок карты с площадкой предприятия (если приложен) ---
+    snapshot = request_data.get("map_snapshot")
+    if snapshot and isinstance(snapshot, str) and "," in snapshot:
+        try:
+            # Отрезаем префикс "data:image/png;base64,"
+            header, b64 = snapshot.split(",", 1)
+            png_bytes = base64.b64decode(b64)
+            snap_buf = io.BytesIO(png_bytes)
+            # Отдельная страница, чтобы снимок не сжимался под остатки места
+            from reportlab.platypus import PageBreak
+            story.append(PageBreak())
+            story.append(Paragraph("6. Карта расположения и контур площадки", h1_style))
+
+            enterprise = request_data.get("enterprise") or {}
+            boundary = (enterprise.get("boundary") or [])
+            ent_name = enterprise.get("name") or "—"
+            info_lines = [f"<b>Предприятие:</b> {ent_name}"]
+            if enterprise.get("address"):
+                info_lines.append(f"<b>Адрес:</b> {enterprise['address']}")
+            info_lines.append(f"<b>Точек контура:</b> {len(boundary)}")
+            story.append(Paragraph(" &nbsp;&nbsp;·&nbsp;&nbsp; ".join(info_lines), body_style))
+            story.append(Spacer(1, 0.3 * cm))
+
+            # Получаем размеры PNG, чтобы сохранить пропорции
+            try:
+                from reportlab.lib.utils import ImageReader
+                ir = ImageReader(io.BytesIO(png_bytes))
+                src_w, src_h = ir.getSize()
+                ratio = src_h / src_w if src_w else 1.0
+            except Exception:
+                ratio = 0.75
+
+            # Доступная высота на странице A4 после заголовка ~ 22 см
+            max_h = 22 * cm
+            disp_w = W
+            disp_h = W * ratio
+            if disp_h > max_h:
+                disp_h = max_h
+                disp_w = max_h / ratio if ratio else W
+
+            snap_img = RLImage(snap_buf, width=disp_w, height=disp_h)
+            story.append(snap_img)
+
+            # Таблица с координатами контура (если задан)
+            if boundary:
+                story.append(Spacer(1, 0.3 * cm))
+                story.append(Paragraph("Координаты вершин контура площадки", h1_style))
+                bnd_rows = [["№", "Широта", "Долгота"]]
+                for i, p in enumerate(boundary, 1):
+                    bnd_rows.append([
+                        str(i),
+                        f"{p.get('lat', 0):.6f}",
+                        f"{p.get('lon', 0):.6f}",
+                    ])
+                tb = Table(bnd_rows, colWidths=[W * 0.15, W * 0.425, W * 0.425])
+                tb.setStyle(TABLE_STYLE)
+                story.append(tb)
+        except Exception as e:
+            # Снимок битый — просто пропускаем секцию, не валим весь PDF
+            print(f"[pdf_export] Не удалось встроить снимок карты: {e}")
 
     doc.build(story)
     return buf.getvalue()

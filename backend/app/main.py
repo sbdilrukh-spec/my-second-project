@@ -345,12 +345,10 @@ def calculate(req: CalculationRequest):
     max_idx = int(total_mg.argmax())
     max_c = float(total_mg[max_idx])
 
-    # Сборка ответа (отфильтровываем нули для уменьшения объёма)
-    threshold = max_c * 0.001   # показываем точки > 0.1% от максимума
+    # Возвращаем ВСЕ точки сетки — фронтенд должен показать полную область
     points = [
         GridPoint(lat=float(lats[i]), lon=float(lons[i]), c=round(float(total_mg[i]), 6))
         for i in range(len(lats))
-        if total_mg[i] > threshold
     ]
 
     pdk = req.pdk or 0.5
@@ -441,6 +439,7 @@ def export_pdf(req: CalculationRequest):
     ]
 
     request_dict = req.model_dump()
+    # map_snapshot уже в request_dict, generate_pdf его прочитает
     result_dict = {
         "points": points_for_pdf,
         "max_c": max_c,

@@ -484,10 +484,10 @@ function WindRose({ windDirection, windSpeed }) {
 }
 
 // ─── Заголовок карты ─────────────────────────────────────────────────────────
-function MapTitle({ enterprise, substance, gridRadius }) {
+function MapTitle({ enterprise, substance, gridXLength, gridYLength }) {
   const name = enterprise?.name || "";
   const subName = substance?.name || "";
-  const scale = gridRadius ? `Масштаб 1:${Math.round(gridRadius * 2 * 3)}` : "";
+  const scale = gridXLength ? `Область: ${gridXLength} x ${gridYLength} м` : "";
 
   if (!name && !subName) return null;
 
@@ -557,9 +557,13 @@ function ViewToggle({ mode, onChange }) {
 }
 
 // ─── Клики на карту ───────────────────────────────────────────────────────────
-function ClickHandler({ pickingIndex, onPick }) {
+function ClickHandler({ pickingIndex, onPick, pickingEnterprise, onEnterprisePick }) {
   useMapEvents({
     click(e) {
+      if (pickingEnterprise) {
+        onEnterprisePick(e.latlng.lat, e.latlng.lng);
+        return;
+      }
       if (pickingIndex !== null) onPick(pickingIndex, e.latlng.lat, e.latlng.lng);
     },
   });
@@ -592,7 +596,9 @@ const TILES = {
 
 // ─── Главный компонент карты ──────────────────────────────────────────────────
 export default function MapView({
-  sources, result, pickingIndex, onPick, onSourceMove, cityCenter,
+  sources, result, pickingIndex, onPick,
+  pickingEnterprise, onEnterprisePick,
+  onSourceMove, cityCenter,
   viewMode, onViewModeChange, gridStep, gridXLength, gridYLength,
   sourceOffsetX, sourceOffsetY, currentPdk,
   meteo, enterprise, substance,
@@ -640,14 +646,61 @@ export default function MapView({
       style={{ height: "100%", width: "100%" }}
     >
       {mapType !== "none" && (
-        <TileLayer url={TILES[mapType].url} attribution={TILES[mapType].attribution} />
+        <TileLayer
+          url={TILES[mapType].url}
+          attribution={TILES[mapType].attribution}
+          crossOrigin="anonymous"
+        />
       )}
       {bgImage && bgBounds && (
         <ImageOverlay url={bgImage} bounds={bgBounds} opacity={1} />
       )}
 
       <RecenterMap center={cityCenter} />
-      <ClickHandler pickingIndex={pickingIndex} onPick={onPick} />
+      <ClickHandler
+        pickingIndex={pickingIndex}
+        onPick={onPick}
+        pickingEnterprise={pickingEnterprise}
+        onEnterprisePick={onEnterprisePick}
+      />
+
+      {/* Контур (полигон) предприятия / карьера */}
+      {enterprise?.boundary?.length >= 3 && (
+        <Polygon
+          positions={enterprise.boundary.map((p) => [p.lat, p.lon])}
+          pathOptions={{
+            color: "#F97316",
+            weight: 3,
+            fillColor: "#F97316",
+            fillOpacity: 0.18,
+          }}
+        >
+          <Popup>
+            <b>🏭 {enterprise.name || "Площадка предприятия"}</b><br />
+            Точек контура: {enterprise.boundary.length}
+          </Popup>
+        </Polygon>
+      )}
+      {/* Маркеры вершин контура */}
+      {enterprise?.boundary?.map((p, i) => (
+        <Marker
+          key={`bnd-${i}`}
+          position={[p.lat, p.lon]}
+          icon={L.divIcon({
+            html: `<div style="background:#F97316;color:#fff;border-radius:50%;
+              width:18px;height:18px;display:flex;align-items:center;justify-content:center;
+              font-size:10px;font-weight:bold;border:2px solid #fff;
+              box-shadow:0 1px 4px rgba(0,0,0,0.4);">${i + 1}</div>`,
+            className: "",
+            iconAnchor: [9, 9],
+          })}
+        >
+          <Popup>
+            <b>Точка {i + 1}</b><br />
+            {p.lat.toFixed(6)}, {p.lon.toFixed(6)}
+          </Popup>
+        </Marker>
+      ))}
 
       {/* Маркеры источников */}
       {sources.map((src, i) => (
@@ -685,27 +738,6 @@ export default function MapView({
         />
       )}
 
-      {/* Маркер максимума */}
-      {result && (
-        <Marker
-          position={[result.max_lat, result.max_lon]}
-          icon={L.divIcon({
-            html: `<div style="background:#DC2626;color:#fff;border-radius:50%;width:28px;height:28px;
-              display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:bold;
-              border:2px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,0.5)">★</div>`,
-            className: "",
-            iconAnchor: [14, 14],
-          })}
-        >
-          <Popup>
-            <b>Максимум концентрации</b><br />
-            C = {result.max_c.toFixed(4)} мг/м³<br />
-            {result.exceeds_pdk
-              ? `⚠ Превышение ПДК в ${(result.max_c / result.pdk).toFixed(2)} раза`
-              : "✓ ПДК не превышена"}
-          </Popup>
-        </Marker>
-      )}
 
       {/* Граница СЗЗ */}
       {result?.szz?.boundary?.length > 2 && (
@@ -747,7 +779,7 @@ export default function MapView({
 
       {/* Заголовок */}
       {result && viewMode === "grid" && (
-        <MapTitle enterprise={enterprise} substance={substance} gridRadius={gridRadius} />
+        <MapTitle enterprise={enterprise} substance={substance} gridXLength={gridXLength} gridYLength={gridYLength} />
       )}
 
       {/* Тип карты + загрузка подложки */}
@@ -803,6 +835,20 @@ export default function MapView({
           boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
         }}>
           📍 Кликните для размещения источника {pickingIndex + 1}
+        </div>
+      )}
+
+      {/* Подсказка выбора точек контура предприятия */}
+      {pickingEnterprise && (
+        <div style={{
+          position: "absolute", top: 12, left: "50%", transform: "translateX(-50%)",
+          zIndex: 1000, background: "#F97316", color: "#fff",
+          padding: "8px 18px", borderRadius: 8, fontSize: 13,
+          pointerEvents: "none", whiteSpace: "nowrap",
+          boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
+        }}>
+          🏭 Кликайте по карте — точки добавляются в контур
+          {enterprise?.boundary?.length > 0 && ` (${enterprise.boundary.length})`}
         </div>
       )}
     </MapContainer>

@@ -50,6 +50,11 @@ class SubstanceInput(BaseModel):
     hazard_class: Optional[int] = None
 
 
+class BoundaryPoint(BaseModel):
+    lat: float
+    lon: float
+
+
 class EnterpriseInput(BaseModel):
     name: Optional[str] = None
     address: Optional[str] = None
@@ -57,6 +62,7 @@ class EnterpriseInput(BaseModel):
     projectNumber: Optional[str] = None
     client: Optional[str] = None
     developer: Optional[str] = None
+    boundary: Optional[List[BoundaryPoint]] = None
 
 
 class CalculationRequest(BaseModel):
@@ -66,6 +72,8 @@ class CalculationRequest(BaseModel):
     pdk: Optional[float] = 0.5
     substance: Optional[SubstanceInput] = None
     enterprise: Optional[EnterpriseInput] = None
+    # Снимок карты Leaflet (data URL "data:image/png;base64,...") — только для /export/pdf
+    map_snapshot: Optional[str] = None
 
 
 class GridPoint(BaseModel):

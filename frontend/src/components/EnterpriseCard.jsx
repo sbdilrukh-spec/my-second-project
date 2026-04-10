@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState } from "react";
 
 const STORAGE_KEY = "ond86_enterprise";
 
@@ -9,6 +9,7 @@ const DEFAULT_ENTERPRISE = {
   projectNumber: "",
   client: "",
   developer: "",
+  boundary: [], // массив точек [{lat, lon}, ...] контура предприятия / карьера
 };
 
 export default function EnterpriseCard({ enterprise, onChange, t }) {
@@ -74,6 +75,11 @@ export default function EnterpriseCard({ enterprise, onChange, t }) {
               onChange={(e) => onChange({ ...enterprise, developer: e.target.value })}
             />
           </div>
+          {enterprise.boundary && enterprise.boundary.length > 0 && (
+            <div style={{ fontSize: 11, color: "#047857", marginTop: 6 }}>
+              ✓ {t.boundaryPointsCount}: {enterprise.boundary.length}
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
+import html2canvas from "html2canvas";
 import { fetchCities, fetchSubstances, fetchWeather, calculate, fetchTables, exportPdf, exportExcel } from "./api.js";
 import { translations } from "./i18n.js";
 import SourceForm, { createDefaultSource } from "./components/SourceForm.jsx";
@@ -12,6 +13,7 @@ import MapView from "./components/MapView.jsx";
 import ResultsPanel from "./components/ResultsPanel.jsx";
 import TableInput from "./components/TableInput.jsx";
 import SubstanceEditor from "./components/SubstanceEditor.jsx";
+import EnterpriseBoundaryEditor from "./components/EnterpriseBoundaryEditor.jsx";
 
 const DEFAULT_METEO = {
   city: "Ташкент",
@@ -30,9 +32,12 @@ const DEFAULT_GRID = {
   source_offset_y: 3500,
 };
 
-// Миграция старых проектов (radius -> x_length/y_length)
+// Миграция старых проектов (radius -> x_length/y_length) + защита от некорректных значений
 function migrateGrid(g) {
-  if (g && g.radius && !g.x_length) {
+  if (!g) return DEFAULT_GRID;
+
+  // Старый формат с radius
+  if (g.radius && !g.x_length) {
     return {
       x_length: g.radius * 2,
       y_length: g.radius * 2,
@@ -41,7 +46,21 @@ function migrateGrid(g) {
       source_offset_y: g.radius,
     };
   }
-  return g;
+
+  // Мерджим с дефолтами и валидируем: любое отсутствующее, NaN или слишком маленькое значение
+  // заменяется дефолтным. Минимум 500 м для области, чтобы избежать "узкой полосы".
+  const validNum = (v, def, min = 500) => {
+    const n = parseFloat(v);
+    return Number.isFinite(n) && n >= min ? n : def;
+  };
+
+  return {
+    x_length: validNum(g.x_length, DEFAULT_GRID.x_length, 500),
+    y_length: validNum(g.y_length, DEFAULT_GRID.y_length, 500),
+    step: validNum(g.step, DEFAULT_GRID.step, 100),
+    source_offset_x: validNum(g.source_offset_x, DEFAULT_GRID.source_offset_x, 0),
+    source_offset_y: validNum(g.source_offset_y, DEFAULT_GRID.source_offset_y, 0),
+  };
 }
 
 export default function App() {
@@ -70,7 +89,9 @@ export default function App() {
   const [viewMode, setViewMode] = useState("heatmap");
 
   const [pickingIndex, setPickingIndex] = useState(null);
+  const [pickingEnterprise, setPickingEnterprise] = useState(false);
   const [inputMode, setInputMode] = useState("cards"); // "cards" | "table"
+  const [sidebarWide, setSidebarWide] = useState(false);
 
   // --- Сценарии (до/после) ---
   const [scenarioMode, setScenarioMode] = useState(false);
@@ -124,6 +145,8 @@ export default function App() {
 
   // Substance editor modal
   const [showSubstanceEditor, setShowSubstanceEditor] = useState(false);
+  // Enterprise boundary editor modal
+  const [showBoundaryEditor, setShowBoundaryEditor] = useState(false);
 
   const reloadSubstances = useCallback(() => {
     fetchSubstances()
@@ -137,15 +160,27 @@ export default function App() {
     return city ? [city.lat, city.lon] : null;
   })();
 
+  // Центроид контура предприятия — null если контур пуст
+  const enterpriseCentroid = (() => {
+    const b = enterprise.boundary;
+    if (!b || b.length === 0) return null;
+    const lat = b.reduce((s, p) => s + (p.lat || 0), 0) / b.length;
+    const lon = b.reduce((s, p) => s + (p.lon || 0), 0) / b.length;
+    return { lat, lon };
+  })();
+
   useEffect(() => {
     const city = cities.find((c) => c.name === meteo.city);
     if (!city) return;
+    // Если контур предприятия задан — он становится якорем,
+    // источник #0 не «прыгает» при смене города.
+    if (enterpriseCentroid) return;
     setSources((prev) =>
       prev.map((src, i) =>
         i === 0 ? { ...src, lat: city.lat, lon: city.lon } : src
       )
     );
-  }, [meteo.city, cities]);
+  }, [meteo.city, cities, enterpriseCentroid?.lat, enterpriseCentroid?.lon]);
 
   const handleSourceChange = useCallback((index, key, value) => {
     setSources((prev) =>
@@ -155,9 +190,12 @@ export default function App() {
 
   const handleAddSource = () => {
     const city = cities.find((c) => c.name === meteo.city);
+    // Приоритет: центроид контура предприятия → центр города → дефолт
+    const baseLat = enterpriseCentroid?.lat ?? city?.lat ?? 41.3;
+    const baseLon = enterpriseCentroid?.lon ?? city?.lon ?? 69.24;
     setSources((prev) => [
       ...prev,
-      createDefaultSource(city?.lat ?? 41.3, city?.lon ?? 69.24, prev.length),
+      createDefaultSource(baseLat, baseLon, prev.length),
     ]);
   };
 
@@ -177,12 +215,46 @@ export default function App() {
 
   const handlePickFromMap = (index) => {
     setPickingIndex(pickingIndex === index ? null : index);
+    setPickingEnterprise(false);
   };
 
   const handleMapPick = (index, lat, lon) => {
     handleSourceChange(index, "lat", lat);
     handleSourceChange(index, "lon", lon);
     setPickingIndex(null);
+  };
+
+  const handleToggleBoundaryPicking = () => {
+    setPickingEnterprise((v) => !v);
+    setPickingIndex(null);
+  };
+
+  // Клик по карте в режиме пикинга — добавляет точку в контур, режим остаётся
+  const handleEnterprisePick = (lat, lon) => {
+    setEnterprise((prev) => ({
+      ...prev,
+      boundary: [...(prev.boundary || []), { lat, lon }],
+    }));
+  };
+
+  const handleBoundaryChange = (newBoundary) => {
+    setEnterprise((prev) => ({ ...prev, boundary: newBoundary }));
+
+    // Если контур задан и источник #1 всё ещё в координатах "по умолчанию"
+    // (центр текущего города) — автоматически переносим его в центроид контура,
+    // чтобы он не висел далеко от площадки.
+    if (!newBoundary || newBoundary.length === 0) return;
+    const cLat = newBoundary.reduce((s, p) => s + (p.lat || 0), 0) / newBoundary.length;
+    const cLon = newBoundary.reduce((s, p) => s + (p.lon || 0), 0) / newBoundary.length;
+    const city = cities.find((c) => c.name === meteo.city);
+    setSources((prev) => prev.map((src, i) => {
+      if (i !== 0) return src;
+      const isAtCityDefault =
+        city &&
+        Math.abs((src.lat ?? 0) - city.lat) < 1e-4 &&
+        Math.abs((src.lon ?? 0) - city.lon) < 1e-4;
+      return isAtCityDefault ? { ...src, lat: cLat, lon: cLon } : src;
+    }));
   };
 
   const handleSourceDrag = (index, lat, lon) => {
@@ -295,12 +367,39 @@ export default function App() {
     }
   };
 
+  // Снимок текущего вида Leaflet → base64 PNG
+  // Возвращает строку "data:image/png;base64,..." или null при ошибке.
+  const captureMapSnapshot = async () => {
+    const mapEl = document.querySelector(".leaflet-container");
+    if (!mapEl) return null;
+    try {
+      const canvas = await html2canvas(mapEl, {
+        useCORS: true,
+        allowTaint: false,
+        backgroundColor: null,
+        logging: false,
+        // Высокое DPI для качественной печати в PDF
+        scale: Math.min(2, window.devicePixelRatio || 1),
+      });
+      return canvas.toDataURL("image/png");
+    } catch (err) {
+      console.warn("Не удалось захватить карту:", err);
+      return null;
+    }
+  };
+
   // Экспорт PDF
   const handleExportPdf = async () => {
     setExporting(true);
     try {
       const pdk = Math.min(...sources.map(s => s.pdk ?? 0.5));
-      await exportPdf({ sources, meteo, grid, pdk, substance: sources[0]?.substance || selectedSubstance, enterprise });
+      const mapSnapshot = await captureMapSnapshot();
+      await exportPdf({
+        sources, meteo, grid, pdk,
+        substance: sources[0]?.substance || selectedSubstance,
+        enterprise,
+        map_snapshot: mapSnapshot,
+      });
     } catch (e) {
       setError("Ошибка генерации PDF.");
     } finally {
@@ -325,10 +424,17 @@ export default function App() {
   return (
     <div className="app-layout">
       {/* ===== ЛЕВАЯ ПАНЕЛЬ ===== */}
-      <aside className="sidebar">
+      <aside className={`sidebar ${sidebarWide ? "sidebar-wide" : ""}`}>
         <div className="sidebar-header">
           <h1 className="app-title">{t.appTitle}</h1>
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <button
+              className="btn-lang"
+              onClick={() => setSidebarWide(!sidebarWide)}
+              title={sidebarWide ? "Сузить панель" : "Расширить панель"}
+            >
+              {sidebarWide ? "« " : " »"}
+            </button>
             <button
               className="btn-editor"
               onClick={() => setShowSubstanceEditor(true)}
@@ -339,6 +445,22 @@ export default function App() {
                 <path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/>
               </svg>
               {t.substanceEditor}
+            </button>
+            <button
+              className="btn-editor"
+              onClick={() => setShowBoundaryEditor(true)}
+              title={t.enterpriseBoundary}
+              style={enterprise.boundary?.length ? { background: "#ECFDF5", borderColor: "#A7F3D0" } : undefined}
+            >
+              {t.enterpriseBoundary}
+              {enterprise.boundary?.length > 0 && (
+                <span style={{
+                  marginLeft: 4, background: "#047857", color: "#fff",
+                  borderRadius: 8, padding: "0 5px", fontSize: 10, fontWeight: 700,
+                }}>
+                  {enterprise.boundary.length}
+                </span>
+              )}
             </button>
             <button
               className="btn-lang"
@@ -511,23 +633,21 @@ export default function App() {
           {/* ---- Расчётная область ---- */}
           <div className="panel-section">
             <h3 className="section-title">{t.grid}</h3>
-            <div style={{ display: "flex", gap: 6 }}>
-              <div className="field-row" style={{ flex: 1 }}>
-                <label>Длина X, м</label>
-                <input
-                  type="number" step="500" min="500"
-                  value={grid.x_length}
-                  onChange={(e) => setGrid({ ...grid, x_length: parseFloat(e.target.value) || 7000 })}
-                />
-              </div>
-              <div className="field-row" style={{ flex: 1 }}>
-                <label>Длина Y, м</label>
-                <input
-                  type="number" step="500" min="500"
-                  value={grid.y_length}
-                  onChange={(e) => setGrid({ ...grid, y_length: parseFloat(e.target.value) || 7000 })}
-                />
-              </div>
+            <div className="field-row">
+              <label>Длина X, м</label>
+              <input
+                type="number" step="500" min="500"
+                value={grid.x_length}
+                onChange={(e) => setGrid({ ...grid, x_length: parseFloat(e.target.value) || 7000 })}
+              />
+            </div>
+            <div className="field-row">
+              <label>Длина Y, м</label>
+              <input
+                type="number" step="500" min="500"
+                value={grid.y_length}
+                onChange={(e) => setGrid({ ...grid, y_length: parseFloat(e.target.value) || 7000 })}
+              />
             </div>
             <div className="field-row">
               <label>{t.step} (100-500 м)</label>
@@ -537,23 +657,21 @@ export default function App() {
                 onChange={(e) => setGrid({ ...grid, step: Math.max(100, Math.min(500, parseFloat(e.target.value) || 500)) })}
               />
             </div>
-            <div style={{ display: "flex", gap: 6 }}>
-              <div className="field-row" style={{ flex: 1 }}>
-                <label>Источник X₀, м</label>
-                <input
-                  type="number" step="100" min="0"
-                  value={grid.source_offset_x}
-                  onChange={(e) => setGrid({ ...grid, source_offset_x: parseFloat(e.target.value) || 0 })}
-                />
-              </div>
-              <div className="field-row" style={{ flex: 1 }}>
-                <label>Источник Y₀, м</label>
-                <input
-                  type="number" step="100" min="0"
-                  value={grid.source_offset_y}
-                  onChange={(e) => setGrid({ ...grid, source_offset_y: parseFloat(e.target.value) || 0 })}
-                />
-              </div>
+            <div className="field-row">
+              <label>Источник X₀, м</label>
+              <input
+                type="number" step="100" min="0"
+                value={grid.source_offset_x}
+                onChange={(e) => setGrid({ ...grid, source_offset_x: parseFloat(e.target.value) || 0 })}
+              />
+            </div>
+            <div className="field-row">
+              <label>Источник Y₀, м</label>
+              <input
+                type="number" step="100" min="0"
+                value={grid.source_offset_y}
+                onChange={(e) => setGrid({ ...grid, source_offset_y: parseFloat(e.target.value) || 0 })}
+              />
             </div>
             <button
               className="btn-secondary btn-sm"
@@ -561,6 +679,13 @@ export default function App() {
               onClick={() => setGrid({ ...grid, source_offset_x: grid.x_length / 2, source_offset_y: grid.y_length / 2 })}
             >
               Источник по центру
+            </button>
+            <button
+              className="btn-secondary btn-sm"
+              style={{ width: "100%", marginTop: 4, fontSize: 11 }}
+              onClick={() => setGrid(DEFAULT_GRID)}
+            >
+              Сбросить область (7000×7000)
             </button>
           </div>
 
@@ -634,6 +759,8 @@ export default function App() {
           result={result}
           pickingIndex={pickingIndex}
           onPick={handleMapPick}
+          pickingEnterprise={pickingEnterprise}
+          onEnterprisePick={handleEnterprisePick}
           onSourceMove={handleSourceDrag}
           cityCenter={cityCenter}
           viewMode={viewMode}
@@ -656,6 +783,21 @@ export default function App() {
           substances={allSubstances}
           onSubstancesChanged={reloadSubstances}
           onClose={() => setShowSubstanceEditor(false)}
+          t={t}
+        />
+      )}
+
+      {/* ===== Редактор контура предприятия ===== */}
+      {showBoundaryEditor && (
+        <EnterpriseBoundaryEditor
+          boundary={enterprise.boundary || []}
+          onChange={handleBoundaryChange}
+          picking={pickingEnterprise}
+          onTogglePicking={handleToggleBoundaryPicking}
+          onClose={() => {
+            setShowBoundaryEditor(false);
+            setPickingEnterprise(false);
+          }}
           t={t}
         />
       )}
