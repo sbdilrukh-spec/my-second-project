@@ -558,9 +558,53 @@ def export_excel(req: CalculationRequest):
 
 
 # ---------------------------------------------------------------------------
-# GET /  — health check
+# GET /api/health  — health check (для облачных пробок Render/Railway)
 # ---------------------------------------------------------------------------
 
-@app.get("/")
-def root():
+@app.get("/api/health")
+def health():
     return {"status": "ok", "app": "ОНД-86 Расчёт рассеивания"}
+
+
+# ---------------------------------------------------------------------------
+# Раздача собранного фронтенда (frontend/dist) для облачного развертывания.
+# В dev-режиме папки dist может не быть — тогда отдаём JSON-заглушку,
+# а Vite крутится отдельно на :5173 с прокси /api → :8000.
+# ---------------------------------------------------------------------------
+
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DIST_DIR = os.path.abspath(os.path.join(_BACKEND_DIR, "..", "frontend", "dist"))
+_INDEX_HTML = os.path.join(_DIST_DIR, "index.html")
+
+
+if os.path.isdir(_DIST_DIR):
+    # Раздаём ассеты Vite (бандлы JS/CSS), они с хэшем в имени —
+    # достаточно прямой StaticFiles-mount.
+    _ASSETS_DIR = os.path.join(_DIST_DIR, "assets")
+    if os.path.isdir(_ASSETS_DIR):
+        app.mount("/assets", StaticFiles(directory=_ASSETS_DIR), name="assets")
+
+    # Catch-all: всё, что не /api/* и не /assets/* — пытаемся отдать как файл из dist,
+    # иначе возвращаем index.html (для SPA-роутинга).
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def serve_spa(full_path: str):
+        if full_path.startswith("api/") or full_path.startswith("assets/"):
+            raise HTTPException(status_code=404)
+        candidate = os.path.join(_DIST_DIR, full_path) if full_path else _INDEX_HTML
+        if full_path and os.path.isfile(candidate):
+            return FileResponse(candidate)
+        if os.path.isfile(_INDEX_HTML):
+            return FileResponse(_INDEX_HTML)
+        raise HTTPException(status_code=404)
+else:
+    # Frontend ещё не собран — отдаём JSON по корню для health-check.
+    @app.get("/")
+    def root():
+        return JSONResponse({
+            "status": "ok",
+            "app": "ОНД-86 Расчёт рассеивания",
+            "note": "frontend/dist not built — use Vite dev server on :5173",
+        })

@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: ond86
+    runtime: docker
+    plan: free
+    region: frankfurt
+    autoDeploy: true
+    healthCheckPath: /api/health
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
