@@ -107,7 +107,9 @@ TABLE_STYLE = TableStyle([
 
 def _make_concentration_plot(points_data: list, grid_step: float = 500,
                               title: str = "Карта рассеивания ЗВ в приземном слое",
-                              grid_params: dict = None) -> io.BytesIO:
+                              grid_params: dict = None,
+                              sources: list = None,
+                              boundary: list = None) -> io.BytesIO:
     """
     Сеточная карта рассеивания в стиле ОНД-86:
     каждая ячейка содержит числовое значение концентрации.
@@ -193,12 +195,48 @@ def _make_concentration_plot(points_data: list, grid_step: float = 500,
     ax.set_xlabel("X, м", fontsize=9)
     ax.set_ylabel("Y, м", fontsize=9)
 
-    # Маркер источника
-    src_x = grid_params.get("source_offset_x", x_range / 2) if grid_params else x_range / 2
-    src_y = grid_params.get("source_offset_y", y_range / 2) if grid_params else y_range / 2
-    ax.plot(src_x, src_y, marker="^", color="#DC2626", markersize=10, zorder=5)
-    ax.text(src_x, src_y - grid_step * 0.35, "Источник", ha="center", va="top",
-            fontsize=font_size + 1, color="#DC2626", fontweight="bold")
+    # Хелпер: lat/lon -> метры от начала координат сетки
+    def _ll_to_xy(lat, lon):
+        x = (lon - origin_lon) * 111000.0 * np.cos(lat_rad)
+        y = (lat - origin_lat) * 111000.0
+        return x, y
+
+    # Контур предприятия / карьера — только линия, без заливки и нумерации
+    if boundary and len(boundary) >= 2:
+        bx, by = [], []
+        for p in boundary:
+            try:
+                px, py = _ll_to_xy(float(p["lat"]), float(p["lon"]))
+                bx.append(px); by.append(py)
+            except (KeyError, TypeError, ValueError):
+                continue
+        if len(bx) >= 2:
+            # Замыкаем контур
+            if len(bx) >= 3:
+                bx.append(bx[0]); by.append(by[0])
+            ax.plot(bx, by, color="#EA580C", linewidth=1.6, zorder=4, solid_capstyle="round")
+
+    # Маркеры источников — пронумерованные кружки
+    src_list = sources or []
+    if not src_list and grid_params:
+        # Совместимость: если sources не передан, используем offset из grid_params
+        sx = grid_params.get("source_offset_x", x_range / 2)
+        sy = grid_params.get("source_offset_y", y_range / 2)
+        src_list = [{"_xy": (sx, sy)}]
+
+    for idx, src in enumerate(src_list):
+        if "_xy" in src:
+            sx, sy = src["_xy"]
+        else:
+            try:
+                sx, sy = _ll_to_xy(float(src["lat"]), float(src["lon"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+        # Кружок с цифрой
+        ax.plot(sx, sy, marker="o", color="#7C2D12", markersize=11,
+                markeredgecolor="#fff", markeredgewidth=1.2, zorder=6)
+        ax.text(sx, sy, str(idx + 1), ha="center", va="center",
+                fontsize=font_size + 1, color="#fff", fontweight="bold", zorder=7)
 
     ax.set_title(title, fontsize=11, fontweight="bold")
 
@@ -219,6 +257,174 @@ def _make_concentration_plot(points_data: list, grid_step: float = 500,
             color="#000", linewidth=1.5, zorder=4)
 
     fig.subplots_adjust(left=0.12, right=0.95, bottom=0.12, top=0.92)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight", pad_inches=0.3)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+# ---------------------------------------------------------------------------
+# Полярная картограмма — концентрации по румбам и расстояниям
+# ---------------------------------------------------------------------------
+
+# Румбы (16 направлений, как в розе ветров)
+_COMPASS_16 = [
+    "С", "ССВ", "СВ", "ВСВ",
+    "В", "ВЮВ", "ЮВ", "ЮЮВ",
+    "Ю", "ЮЮЗ", "ЮЗ", "ЗЮЗ",
+    "З", "ЗСЗ", "СЗ", "ССЗ",
+]
+
+
+def _make_polar_plot(points_data: list, sources: list = None,
+                     pdk: float = None,
+                     title: str = "Концентрации по румбам и расстояниям"):
+    """
+    Полярная картограмма: концентрации в координатах (расстояние, румб)
+    относительно центра источников. 16 секторов по 22.5°, кольца на
+    автоматически подобранных расстояниях (от шага сетки до её границы).
+    Цветные клетки + численное значение в каждой.
+    """
+    if not points_data:
+        return None
+    lats = np.array([p["lat"] for p in points_data])
+    lons = np.array([p["lon"] for p in points_data])
+    conc = np.array([p["c"] for p in points_data])
+
+    # Центр — среднее источников, если есть; иначе центр сетки
+    if sources:
+        try:
+            center_lat = float(np.mean([float(s["lat"]) for s in sources]))
+            center_lon = float(np.mean([float(s["lon"]) for s in sources]))
+        except (KeyError, TypeError, ValueError):
+            center_lat = float(np.mean(lats))
+            center_lon = float(np.mean(lons))
+    else:
+        center_lat = float(np.mean(lats))
+        center_lon = float(np.mean(lons))
+
+    lat_rad = center_lat * np.pi / 180.0
+    # Расстояния (м) и направления (азимут, 0=С, по часовой) от центра до каждой точки
+    dx_e = (lons - center_lon) * 111_000.0 * np.cos(lat_rad)
+    dy_n = (lats - center_lat) * 111_000.0
+    r_pts = np.sqrt(dx_e**2 + dy_n**2)
+    az_pts = (np.degrees(np.arctan2(dx_e, dy_n)) + 360.0) % 360.0
+
+    # Подбираем кольца по реальному радиусу области
+    r_max = float(np.max(r_pts)) if len(r_pts) else 0
+    if r_max < 100:
+        return None
+    # 6 колец, начиная с разумного шага
+    candidates = [50, 100, 200, 250, 500, 1000, 2000]
+    # Шаг между кольцами — округлённый r_max / 6
+    target = r_max / 6
+    step = min(candidates, key=lambda v: abs(v - target))
+    rings = [step * (i + 1) for i in range(6) if step * (i + 1) <= r_max + step * 0.5]
+    if not rings:
+        rings = [int(r_max)]
+
+    # Сектора: 16 по 22.5°
+    n_sec = 16
+    sec_width = 360.0 / n_sec  # 22.5°
+
+    # Для каждой (кольцо, сектор) — выбираем максимум среди точек,
+    # попавших в это окно. Окно: r ± step/2, азимут ± sec_width/2.
+    grid_vals = np.zeros((len(rings), n_sec))
+    for ri, r0 in enumerate(rings):
+        r_lo = r0 - step / 2
+        r_hi = r0 + step / 2
+        for si in range(n_sec):
+            az0 = si * sec_width
+            # окно по азимуту с обработкой перехода через 0/360
+            az_diff = ((az_pts - az0 + 180) % 360) - 180  # -180..180
+            in_sec = (np.abs(az_diff) <= sec_width / 2) & (r_pts >= r_lo) & (r_pts <= r_hi)
+            if np.any(in_sec):
+                grid_vals[ri, si] = float(np.max(conc[in_sec]))
+            # Если в окне пусто — оставляем 0 (визуально светлая ячейка)
+
+    max_c = float(grid_vals.max()) if grid_vals.max() > 0 else 1.0
+
+    # Рисуем
+    fig = plt.figure(figsize=(9, 9))
+    ax = fig.add_subplot(111, projection="polar")
+    # 0° наверху, по часовой стрелке (как роза ветров)
+    ax.set_theta_zero_location("N")
+    ax.set_theta_direction(-1)
+
+    # Wedges
+    for ri, r0 in enumerate(rings):
+        r_inner = r0 - step / 2 if ri == 0 else (rings[ri - 1] + rings[ri]) / 2
+        r_outer = r0 + step / 2 if ri == len(rings) - 1 else (rings[ri] + rings[ri + 1]) / 2
+        for si in range(n_sec):
+            theta_center = np.radians(si * sec_width)
+            theta_lo = np.radians(si * sec_width - sec_width / 2)
+            theta_hi = np.radians(si * sec_width + sec_width / 2)
+            v = grid_vals[ri, si]
+            ratio = v / max_c if max_c > 0 else 0
+            # Цвет — плавная шкала бело→жёлтое→оранжевое→красное
+            if v <= 0:
+                fc = "#FFFFFF"
+            elif ratio > 0.85:
+                fc = "#DC2626"
+            elif ratio > 0.6:
+                fc = "#F97316"
+            elif ratio > 0.35:
+                fc = "#FACC15"
+            elif ratio > 0.15:
+                fc = "#FEF3C7"
+            else:
+                fc = "#FFFFFF"
+            # Дополнительная подсветка превышения ПДК
+            if pdk and v > pdk:
+                edge = "#7F1D1D"
+                lw = 1.2
+            else:
+                edge = "#94A3B8"
+                lw = 0.5
+            ax.bar(
+                theta_center, r_outer - r_inner, width=np.radians(sec_width),
+                bottom=r_inner, color=fc, edgecolor=edge, linewidth=lw, zorder=2,
+            )
+            if v > 0:
+                # Подпись концентрации в центре сектора
+                ax.text(
+                    theta_center, (r_inner + r_outer) / 2,
+                    f"{v:.3f}",
+                    ha="center", va="center",
+                    fontsize=7, fontweight="bold" if ratio > 0.85 else "normal",
+                    color="#fff" if ratio > 0.85 else "#1F2937", zorder=3,
+                )
+
+    # Оформление
+    ax.set_rlabel_position(112.5)  # положение подписей радиуса
+    ax.set_rgrids(rings, labels=[f"{r:g} м" for r in rings], fontsize=8, color="#475569")
+    ax.set_xticks(np.radians([i * sec_width for i in range(n_sec)]))
+    ax.set_xticklabels(_COMPASS_16, fontsize=9, fontweight="bold")
+    ax.set_ylim(0, rings[-1] + step / 2)
+    ax.grid(color="#CBD5E1", linewidth=0.4)
+    ax.set_title(title, fontsize=12, fontweight="bold", pad=18)
+
+    # Маркер источника(ов) — красная точка в центре + цифры
+    ax.plot(0, 0, marker="o", color="#7C2D12", markersize=10,
+            markeredgecolor="#fff", markeredgewidth=1.2, zorder=5)
+    if sources and len(sources) > 1:
+        ax.text(0, 0, str(len(sources)),
+                ha="center", va="center", fontsize=8, fontweight="bold",
+                color="#fff", zorder=6)
+    else:
+        ax.text(0, 0, "1",
+                ha="center", va="center", fontsize=8, fontweight="bold",
+                color="#fff", zorder=6)
+
+    # Легенда внизу
+    legend_text = (
+        f"Цвет ячейки — отношение к максимуму ({max_c:.3f} мг/м³). "
+        + (f"Жирная рамка — превышение ПДК ({pdk:.3f} мг/м³)." if pdk else "")
+    )
+    fig.text(0.5, 0.02, legend_text, ha="center", fontsize=8, color="#475569")
+
+    fig.subplots_adjust(left=0.05, right=0.95, top=0.92, bottom=0.08)
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=150, bbox_inches="tight", pad_inches=0.3)
     plt.close(fig)
@@ -372,11 +578,47 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
         x_len = grid_data.get("x_length", 7000)
         y_len = grid_data.get("y_length", 7000)
         aspect = y_len / x_len if x_len > 0 else 1.0
-        plot_buf = _make_concentration_plot(points, grid_step=grid_step, grid_params=grid_data)
+        sources_for_plot = request_data.get("sources") or []
+        boundary_for_plot = (request_data.get("enterprise") or {}).get("boundary") or []
+        # Название вещества для заголовка графика —
+        # сначала из request.substance, затем из первого источника
+        subst = request_data.get("substance") or {}
+        if not subst and sources_for_plot:
+            subst = (sources_for_plot[0] or {}).get("substance") or {}
+        subst_name = subst.get("name") or subst.get("code") or ""
+        plot_title = "Карта рассеивания ЗВ в приземном слое"
+        if subst_name:
+            plot_title = f"Карта рассеивания: {subst_name}"
+        plot_buf = _make_concentration_plot(
+            points, grid_step=grid_step, grid_params=grid_data,
+            sources=sources_for_plot, boundary=boundary_for_plot,
+            title=plot_title,
+        )
         img = RLImage(plot_buf, width=W, height=W * min(aspect, 1.2))
         story.append(img)
 
-    # --- 6. Снимок карты с площадкой предприятия (если приложен) ---
+        # --- 5b. Полярная картограмма по румбам и расстояниям ---
+        from reportlab.platypus import PageBreak
+        polar_title = "Концентрации по румбам и расстояниям"
+        if subst_name:
+            polar_title = f"Концентрации по румбам: {subst_name}"
+        polar_buf = _make_polar_plot(
+            points, sources=sources_for_plot, pdk=result_data.get("pdk"),
+            title=polar_title,
+        )
+        if polar_buf is not None:
+            story.append(PageBreak())
+            story.append(Paragraph("6. Концентрации по румбам и расстояниям", h1_style))
+            polar_img = RLImage(polar_buf, width=W, height=W)
+            story.append(polar_img)
+            story.append(Paragraph(
+                "Каждая ячейка — максимум приземной концентрации в соответствующем "
+                "румбе и кольце расстояний от центра промплощадки. "
+                "Расчёт выполнен по 36 направлениям ветра (режим 360°).",
+                body_style,
+            ))
+
+    # --- 7. Снимок карты с площадкой предприятия (если приложен) ---
     snapshot = request_data.get("map_snapshot")
     if snapshot and isinstance(snapshot, str) and "," in snapshot:
         try:
@@ -387,7 +629,7 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
             # Отдельная страница, чтобы снимок не сжимался под остатки места
             from reportlab.platypus import PageBreak
             story.append(PageBreak())
-            story.append(Paragraph("6. Карта расположения и контур площадки", h1_style))
+            story.append(Paragraph("7. Карта расположения и контур площадки", h1_style))
 
             enterprise = request_data.get("enterprise") or {}
             boundary = (enterprise.get("boundary") or [])

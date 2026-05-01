@@ -150,10 +150,19 @@ function GridOverlay({ points, maxC, gridStep, originLat, originLon, xLength, yL
         // Значение в ячейке
         if (showText && p.c > 0) {
           ctx.font = `${isMax ? "bold " : ""}${fontSize}px monospace`;
-          ctx.fillStyle = isMax ? "#CC0000" : (ratio > 0.6 ? "#7C2D12" : "#111111");
           ctx.textAlign = "center";
           ctx.textBaseline = "middle";
-          ctx.fillText(p.c.toFixed(4), px.x, px.y);
+          if (isMax) {
+            // Белый текст с чёрной обводкой — читается на красном фоне
+            ctx.lineWidth = 3;
+            ctx.strokeStyle = "#000";
+            ctx.strokeText(p.c.toFixed(4), px.x, px.y);
+            ctx.fillStyle = "#fff";
+            ctx.fillText(p.c.toFixed(4), px.x, px.y);
+          } else {
+            ctx.fillStyle = ratio > 0.6 ? "#7C2D12" : "#111111";
+            ctx.fillText(p.c.toFixed(4), px.x, px.y);
+          }
         }
 
         // Собираем для осей (координаты от начала: 0, 500, 1000, ...)
@@ -681,26 +690,6 @@ export default function MapView({
           </Popup>
         </Polygon>
       )}
-      {/* Маркеры вершин контура */}
-      {enterprise?.boundary?.map((p, i) => (
-        <Marker
-          key={`bnd-${i}`}
-          position={[p.lat, p.lon]}
-          icon={L.divIcon({
-            html: `<div style="background:#F97316;color:#fff;border-radius:50%;
-              width:18px;height:18px;display:flex;align-items:center;justify-content:center;
-              font-size:10px;font-weight:bold;border:2px solid #fff;
-              box-shadow:0 1px 4px rgba(0,0,0,0.4);">${i + 1}</div>`,
-            className: "",
-            iconAnchor: [9, 9],
-          })}
-        >
-          <Popup>
-            <b>Точка {i + 1}</b><br />
-            {p.lat.toFixed(6)}, {p.lon.toFixed(6)}
-          </Popup>
-        </Marker>
-      ))}
 
       {/* Маркеры источников */}
       {sources.map((src, i) => (
@@ -709,6 +698,14 @@ export default function MapView({
           position={[src.lat || 41.3, src.lon || 69.24]}
           draggable
           eventHandlers={{ dragend(e) { const ll = e.target.getLatLng(); onSourceMove(i, ll.lat, ll.lng); } }}
+          icon={L.divIcon({
+            html: `<div style="background:#7C2D12;color:#fff;border-radius:50%;
+              width:24px;height:24px;display:flex;align-items:center;justify-content:center;
+              font-size:12px;font-weight:bold;border:2px solid #fff;
+              box-shadow:0 2px 6px rgba(0,0,0,0.5);font-family:sans-serif;">${i + 1}</div>`,
+            className: "",
+            iconAnchor: [12, 12],
+          })}
         >
           <Popup>
             <b>{src.name}</b><br />
