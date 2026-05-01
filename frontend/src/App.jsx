@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import html2canvas from "html2canvas";
 import { fetchCities, fetchSubstances, fetchWeather, calculate, fetchTables, exportPdf, exportExcel } from "./api.js";
 import { translations } from "./i18n.js";
-import SourceForm, { createDefaultSource } from "./components/SourceForm.jsx";
+import SourceForm, { createDefaultSource, migrateSource } from "./components/SourceForm.jsx";
 import MeteoPanel from "./components/MeteoPanel.jsx";
 
 import EnterpriseCard, { DEFAULT_ENTERPRISE } from "./components/EnterpriseCard.jsx";
@@ -77,10 +77,15 @@ export default function App() {
   const [meteo, setMeteo] = useState(savedProject?.meteo || DEFAULT_METEO);
   const [grid, setGrid] = useState(migrateGrid(savedProject?.grid) || DEFAULT_GRID);
   const [selectedSubstance, setSelectedSubstance] = useState(savedProject?.selectedSubstance || null);
-  const [sources, setSources] = useState(savedProject?.sources || [createDefaultSource(41.2995, 69.2401, 0)]);
+  const [sources, setSources] = useState(
+    savedProject?.sources
+      ? savedProject.sources.map(migrateSource)
+      : [createDefaultSource(41.2995, 69.2401, 0)]
+  );
   const [enterprise, setEnterprise] = useState(savedProject?.enterprise || DEFAULT_ENTERPRISE);
 
   const [result, setResult] = useState(null);
+  const [displaySubstanceCode, setDisplaySubstanceCode] = useState(null); // выбранное для отображения вещество (если расчёт многовеществный)
   const [tables, setTables] = useState(null);
   const [loading, setLoading] = useState(false);
   const [tablesLoading, setTablesLoading] = useState(false);
@@ -160,6 +165,31 @@ export default function App() {
     return city ? [city.lat, city.lon] : null;
   })();
 
+  // displayedResult — то, что реально показывается на карте и в панели результатов.
+  // Если есть многовеществный расчёт (by_substance), берём данные для выбранного
+  // displaySubstanceCode. Иначе используем плоские поля результата.
+  const displayedResult = (() => {
+    if (!result) return null;
+    if (Array.isArray(result.by_substance) && result.by_substance.length > 0) {
+      const code = displaySubstanceCode || result.primary_code;
+      const sub = result.by_substance.find(s => s.code === code) || result.by_substance[0];
+      if (sub) {
+        return {
+          ...result,
+          points: sub.points,
+          max_c: sub.max_c,
+          max_lat: sub.max_lat,
+          max_lon: sub.max_lon,
+          source_results: sub.source_results,
+          exceeds_pdk: sub.exceeds_pdk,
+          pdk: sub.pdk,
+          _substance: { code: sub.code, name: sub.name, pdk_mr: sub.pdk, hazard_class: sub.hazard_class },
+        };
+      }
+    }
+    return result;
+  })();
+
   // Центроид контура предприятия — null если контур пуст
   const enterpriseCentroid = (() => {
     const b = enterprise.boundary;
@@ -183,8 +213,59 @@ export default function App() {
   }, [meteo.city, cities, enterpriseCentroid?.lat, enterpriseCentroid?.lon]);
 
   const handleSourceChange = useCallback((index, key, value) => {
+    // Старые ключи (substance/pdk/emission_gs/emission_ty) перенаправляем
+    // в первый элемент массива emissions — для обратной совместимости с
+    // компонентами, которые ещё не знают про многовеществную модель
+    // (например, TableInput, ImportPanel).
+    const LEGACY_KEYS = new Set(["substance", "pdk", "emission_gs", "emission_ty"]);
     setSources((prev) =>
-      prev.map((src, i) => (i === index ? { ...src, [key]: value } : src))
+      prev.map((src, i) => {
+        if (i !== index) return src;
+        if (LEGACY_KEYS.has(key)) {
+          const ems = Array.isArray(src.emissions) && src.emissions.length > 0
+            ? [...src.emissions]
+            : [{ substance: null, emission_gs: null, emission_ty: null, pdk: 0.5 }];
+          ems[0] = { ...ems[0], [key]: value };
+          return { ...src, emissions: ems };
+        }
+        return { ...src, [key]: value };
+      })
+    );
+  }, []);
+
+  // Изменение конкретного поля одной строки выбросов
+  const handleEmissionChange = useCallback((srcIdx, emIdx, key, value) => {
+    setSources((prev) =>
+      prev.map((src, i) => {
+        if (i !== srcIdx) return src;
+        const ems = Array.isArray(src.emissions) ? [...src.emissions] : [];
+        if (emIdx < 0 || emIdx >= ems.length) return src;
+        ems[emIdx] = { ...ems[emIdx], [key]: value };
+        return { ...src, emissions: ems };
+      })
+    );
+  }, []);
+
+  const handleAddEmission = useCallback((srcIdx) => {
+    setSources((prev) =>
+      prev.map((src, i) => {
+        if (i !== srcIdx) return src;
+        const ems = Array.isArray(src.emissions) ? [...src.emissions] : [];
+        ems.push({ substance: null, emission_gs: null, emission_ty: null, pdk: 0.5 });
+        return { ...src, emissions: ems };
+      })
+    );
+  }, []);
+
+  const handleRemoveEmission = useCallback((srcIdx, emIdx) => {
+    setSources((prev) =>
+      prev.map((src, i) => {
+        if (i !== srcIdx) return src;
+        const ems = Array.isArray(src.emissions) ? [...src.emissions] : [];
+        if (ems.length <= 1) return src; // последнюю не удаляем
+        const next = ems.filter((_, idx) => idx !== emIdx);
+        return { ...src, emissions: next };
+      })
     );
   }, []);
 
@@ -328,7 +409,7 @@ export default function App() {
       reader.onload = (ev) => {
         try {
           const project = JSON.parse(ev.target.result);
-          if (project.sources) setSources(project.sources);
+          if (project.sources) setSources(project.sources.map(migrateSource));
           if (project.meteo) setMeteo(project.meteo);
           if (project.grid) setGrid(project.grid);
           if (project.selectedSubstance) setSelectedSubstance(project.selectedSubstance);
@@ -366,13 +447,20 @@ export default function App() {
     setLoading(true);
     setError(null);
     try {
-      const pdk = Math.min(...sources.map(s => s.pdk ?? 0.5));
+      // Минимальный ПДК среди всех выбросов всех источников (для совместимости со старым API)
+      const allPdks = sources.flatMap(s => (s.emissions || []).map(e => e.pdk ?? 0.5));
+      const pdk = allPdks.length ? Math.min(...allPdks) : 0.5;
       const payload = { sources, meteo, grid, pdk };
       const res = await calculate(payload);
-      // Замораживаем в результате вещество, с которым считали — иначе при смене
-      // выбора в дропдауне заголовок съезжает, а цифры остаются от старого расчёта.
-      const substanceAtCalc = sources[0]?.substance || selectedSubstance || null;
+      // Замораживаем в результате вещество главного (худшего) расчёта.
+      // by_substance теперь содержит результаты по всем веществам отдельно.
+      const primarySub = res.by_substance?.find?.(s => s.code === res.primary_code) || res.by_substance?.[0];
+      const substanceAtCalc = primarySub
+        ? { code: primarySub.code, name: primarySub.name, pdk_mr: primarySub.pdk, hazard_class: primarySub.hazard_class }
+        : (sources[0]?.emissions?.[0]?.substance || selectedSubstance || null);
       setResult({ ...res, _substance: substanceAtCalc, _pdk: pdk });
+      // По умолчанию отображаем главное вещество
+      setDisplaySubstanceCode(res.primary_code || null);
     } catch (e) {
       const detail = e?.response?.data?.detail;
       if (Array.isArray(detail)) {
@@ -503,9 +591,19 @@ export default function App() {
                   const found = allSubstances.find((s) => s.code === code);
                   if (found) {
                     setSelectedSubstance(found);
-                    // Применить ПДК ко всем источникам
+                    // Применяем выбранное вещество к ПЕРВОМУ выбросу каждого источника,
+                    // если у того ещё не задано вещество. Не трогаем уже настроенные.
                     if (found.pdk_mr != null) {
-                      setSources(prev => prev.map(s => ({ ...s, pdk: found.pdk_mr, substance: found })));
+                      setSources(prev => prev.map(s => {
+                        const ems = Array.isArray(s.emissions) && s.emissions.length > 0
+                          ? [...s.emissions]
+                          : [{ substance: null, emission_gs: null, emission_ty: null, pdk: 0.5 }];
+                        // Если у первого выброса нет вещества — заполняем дефолтом
+                        if (!ems[0].substance) {
+                          ems[0] = { ...ems[0], substance: found, pdk: found.pdk_mr };
+                        }
+                        return { ...s, emissions: ems };
+                      }));
                     }
                   }
                 }}
@@ -534,7 +632,14 @@ export default function App() {
                 onChange={(e) => {
                   const val = parseFloat(e.target.value) || 0.5;
                   setSelectedSubstance(prev => prev ? { ...prev, pdk_mr: val } : { code: "", name: "", pdk_mr: val });
-                  setSources(prev => prev.map(s => ({ ...s, pdk: val })));
+                  // Применяем ПДК к первому выбросу каждого источника
+                  setSources(prev => prev.map(s => {
+                    const ems = Array.isArray(s.emissions) && s.emissions.length > 0
+                      ? [...s.emissions]
+                      : [{ substance: null, emission_gs: null, emission_ty: null, pdk: 0.5 }];
+                    ems[0] = { ...ems[0], pdk: val };
+                    return { ...s, emissions: ems };
+                  }));
                 }}
               />
             </div>
@@ -585,6 +690,9 @@ export default function App() {
                     source={src}
                     index={i}
                     onChange={handleSourceChange}
+                    onEmissionChange={handleEmissionChange}
+                    onAddEmission={handleAddEmission}
+                    onRemoveEmission={handleRemoveEmission}
                     onRemove={handleRemoveSource}
                     onPickFromMap={handlePickFromMap}
                     substances={allSubstances}
@@ -632,32 +740,53 @@ export default function App() {
                   return null;
                 };
 
-                setSources((prev) => [...prev, ...imported.map((s, i) => {
+                // Группируем строки по имени источника:
+                // несколько строк с одним name → один источник с несколькими выбросами.
+                const groups = new Map();
+                imported.forEach((row, i) => {
+                  const name = (row.name && String(row.name).trim()) || `Источник ${i + 1}`;
+                  if (!groups.has(name)) groups.set(name, []);
+                  groups.get(name).push(row);
+                });
+
+                const totalGroups = groups.size;
+                const gridCols = Math.ceil(Math.sqrt(totalGroups));
+
+                const newSources = [];
+                let groupIdx = 0;
+                for (const [name, rows] of groups.entries()) {
+                  const first = rows[0];
                   // Авторасстановка по сетке если нет координат
-                  const row = Math.floor(i / cols);
-                  const col = i % cols;
-                  const autoLat = centerLat + (row - Math.floor(cols / 2)) * spacing;
-                  const autoLon = centerLon + (col - Math.floor(cols / 2)) * spacing;
+                  const r = Math.floor(groupIdx / gridCols);
+                  const c = groupIdx % gridCols;
+                  const autoLat = centerLat + (r - Math.floor(gridCols / 2)) * spacing;
+                  const autoLon = centerLon + (c - Math.floor(gridCols / 2)) * spacing;
 
-                  // Подтягиваем вещество из импорта (колонки "Код вещества" / "Название вещества"),
-                  // если не нашли — fallback к глобально выбранному.
-                  const importedSub = findSubstance(s.substance_code, s.substance_name);
-                  const subForSource = importedSub || selectedSubstance || null;
+                  // Каждая строка в группе → одна запись в emissions
+                  const emissions = rows.map((row) => {
+                    const sub = findSubstance(row.substance_code, row.substance_name) || selectedSubstance || null;
+                    return {
+                      substance: sub,
+                      emission_gs: row.emission_gs ?? null,
+                      emission_ty: row.emission_ty ?? null,
+                      pdk: sub?.pdk_mr ?? 0.5,
+                    };
+                  });
 
-                  return {
-                    name: s.name || `Источник ${prev.length + i + 1}`,
-                    lat: s.lat || autoLat,
-                    lon: s.lon || autoLon,
-                    height: s.height || 30,
-                    diameter: s.diameter || 1.0,
-                    velocity: s.velocity || 8.0,
-                    temperature: s.temperature || 120,
-                    emission_gs: s.emission_gs || null,
-                    emission_ty: s.emission_ty || null,
-                    pdk: subForSource?.pdk_mr ?? 0.5,
-                    substance: subForSource,
-                  };
-                })]);
+                  newSources.push({
+                    name,
+                    lat: first.lat || autoLat,
+                    lon: first.lon || autoLon,
+                    height: first.height || 30,
+                    diameter: first.diameter || 1.0,
+                    velocity: first.velocity || 8.0,
+                    temperature: first.temperature || 120,
+                    emissions,
+                  });
+                  groupIdx += 1;
+                }
+
+                setSources((prev) => [...prev, ...newSources]);
               }}
               t={t}
             />
@@ -762,10 +891,33 @@ export default function App() {
             {loading ? t.calculating : t.calculate}
           </button>
 
+          {/* ---- Переключатель отображаемого вещества (если расчёт многовеществный) ---- */}
+          {result?.by_substance?.length > 1 && (
+            <div className="panel-section" style={{ background: "#F0F9FF", border: "1px solid #BAE6FD", borderRadius: 6, padding: 8 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: "#075985", marginBottom: 6 }}>
+                {t.substanceSwitcher}
+              </div>
+              <select
+                value={displaySubstanceCode || ""}
+                onChange={(e) => setDisplaySubstanceCode(e.target.value || null)}
+                style={{ width: "100%", fontSize: 12, padding: "4px 6px" }}
+              >
+                {result.by_substance.map((s) => (
+                  <option key={s.code} value={s.code}>
+                    {s.name || s.code}
+                    {s.exceeds_pdk ? " ⚠" : " ✓"}
+                    {" "}— Cmax = {s.max_c.toFixed(4)} мг/м³
+                    {s.code === result.primary_code ? " (главное)" : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           {/* ---- Результаты ---- */}
           <ResultsPanel
-            result={result}
-            currentPdk={Math.min(...sources.map(s => s.pdk ?? 0.5))}
+            result={displayedResult}
+            currentPdk={displayedResult?.pdk ?? 0.5}
             onExportPdf={handleExportPdf}
             exporting={exporting}
             onExportExcel={handleExportExcel}
@@ -806,7 +958,7 @@ export default function App() {
       <main className="map-area">
         <MapView
           sources={sources}
-          result={result}
+          result={displayedResult}
           pickingIndex={pickingIndex}
           onPick={handleMapPick}
           pickingEnterprise={pickingEnterprise}
@@ -820,10 +972,10 @@ export default function App() {
           gridYLength={grid.y_length}
           sourceOffsetX={grid.source_offset_x}
           sourceOffsetY={grid.source_offset_y}
-          currentPdk={Math.min(...sources.map(s => s.pdk ?? 0.5))}
+          currentPdk={displayedResult?.pdk ?? 0.5}
           meteo={meteo}
           enterprise={enterprise}
-          substance={result?._substance || sources[0]?.substance || selectedSubstance}
+          substance={displayedResult?._substance || sources[0]?.emissions?.[0]?.substance || selectedSubstance}
         />
       </main>
 

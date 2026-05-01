@@ -9,9 +9,12 @@ import os
 import openpyxl
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 
-from .models import CalculationRequest, CalculationResponse, GridPoint, SourceResult, SzzResult, SzzBoundaryPoint
+from .models import (
+    CalculationRequest, CalculationResponse, GridPoint, SourceResult,
+    SubstanceResult, SzzResult, SzzBoundaryPoint,
+)
 from .meteo_data import CITIES
-from .ond86 import compute_grid, compute_szz_boundary
+from .ond86 import compute_grid, compute_szz_boundary, compute_per_substance
 from .pdf_export import generate_pdf
 from .substances import SUBSTANCES
 from .tables import generate_pdv_tables, generate_ovos_tables
@@ -334,29 +337,53 @@ def calculate(req: CalculationRequest):
         # Если города нет в БД — используем коэффициент по умолчанию
         city_data = {"A": 200, "lat": req.sources[0].lat, "lon": req.sources[0].lon}
 
-    lats, lons, total_mg, src_results = compute_grid(
+    multi = compute_per_substance(
         sources=req.sources,
         meteo=req.meteo,
         city_data=city_data,
         **_grid_kwargs(req.grid),
     )
 
-    # Максимум
-    max_idx = int(total_mg.argmax())
-    max_c = float(total_mg[max_idx])
+    # Собираем плоский список SubstanceResult
+    by_substance = []
+    for code, data in multi["by_substance"].items():
+        sub_meta = data.get("substance") or {}
+        by_substance.append(SubstanceResult(
+            code=code if code != "unknown" else (sub_meta.get("code") if sub_meta else None),
+            name=sub_meta.get("name") if sub_meta else None,
+            hazard_class=sub_meta.get("hazard_class") if sub_meta else None,
+            pdk=data["pdk"],
+            max_c=round(data["max_c"], 6),
+            max_lat=data["max_lat"],
+            max_lon=data["max_lon"],
+            exceeds_pdk=data["exceeds_pdk"],
+            ratio_to_pdk=round(data["ratio_to_pdk"], 4),
+            points=[
+                GridPoint(lat=p["lat"], lon=p["lon"], c=round(p["c"], 6))
+                for p in data["points"]
+            ],
+            source_results=[SourceResult(**sr) for sr in data["source_results"]],
+        ))
 
-    # Возвращаем ВСЕ точки сетки — фронтенд должен показать полную область
-    points = [
-        GridPoint(lat=float(lats[i]), lon=float(lons[i]), c=round(float(total_mg[i]), 6))
-        for i in range(len(lats))
+    # Главное (худшее) вещество — поля для обратной совместимости
+    primary_code = multi["primary_code"]
+    primary_data = multi["by_substance"][primary_code]
+
+    primary_points = [
+        GridPoint(lat=p["lat"], lon=p["lon"], c=round(p["c"], 6))
+        for p in primary_data["points"]
     ]
+    primary_pdk = primary_data["pdk"]
 
-    pdk = req.pdk or 0.5
-
-    # Расчёт границы СЗЗ
+    # Расчёт границы СЗЗ — по главному веществу, как и раньше
     center_lat = sum(s.lat for s in req.sources) / len(req.sources)
     center_lon = sum(s.lon for s in req.sources) / len(req.sources)
-    szz_data = compute_szz_boundary(lats, lons, total_mg, pdk, center_lat, center_lon)
+    import numpy as _np
+    primary_lats = _np.array([p.lat for p in primary_points])
+    primary_lons = _np.array([p.lon for p in primary_points])
+    primary_total_mg = _np.array([p.c for p in primary_points])
+    szz_data = compute_szz_boundary(primary_lats, primary_lons, primary_total_mg,
+                                    primary_pdk, center_lat, center_lon)
     szz = SzzResult(
         boundary=[SzzBoundaryPoint(**p) for p in szz_data["boundary"]],
         max_distance_m=szz_data["max_distance_m"],
@@ -365,14 +392,16 @@ def calculate(req: CalculationRequest):
     ) if szz_data["max_distance_m"] > 0 else None
 
     return CalculationResponse(
-        points=points,
-        max_c=round(max_c, 6),
-        max_lat=float(lats[max_idx]),
-        max_lon=float(lons[max_idx]),
-        source_results=[SourceResult(**sr) for sr in src_results],
-        exceeds_pdk=max_c > pdk,
-        pdk=pdk,
+        points=primary_points,
+        max_c=round(primary_data["max_c"], 6),
+        max_lat=primary_data["max_lat"],
+        max_lon=primary_data["max_lon"],
+        source_results=[SourceResult(**sr) for sr in primary_data["source_results"]],
+        exceeds_pdk=primary_data["exceeds_pdk"],
+        pdk=primary_pdk,
         szz=szz,
+        by_substance=by_substance,
+        primary_code=primary_code if primary_code != "unknown" else None,
     )
 
 
@@ -421,33 +450,45 @@ def get_tables(req: CalculationRequest):
 def export_pdf(req: CalculationRequest):
     city_data = CITIES.get(req.meteo.city, {"A": 200})
 
-    lats, lons, total_mg, src_results = compute_grid(
+    multi = compute_per_substance(
         sources=req.sources,
         meteo=req.meteo,
         city_data=city_data,
         **_grid_kwargs(req.grid),
     )
 
-    max_idx = int(total_mg.argmax())
-    max_c = float(total_mg[max_idx])
-    pdk = req.pdk or 0.5
-
-    # Для PDF берём все точки (для графика)
-    points_for_pdf = [
-        {"lat": float(lats[i]), "lon": float(lons[i]), "c": float(total_mg[i])}
-        for i in range(len(lats))
-    ]
+    primary_code = multi["primary_code"]
+    primary = multi["by_substance"][primary_code]
+    pdk = primary["pdk"]
 
     request_dict = req.model_dump()
-    # map_snapshot уже в request_dict, generate_pdf его прочитает
+    # map_snapshot уже в request_dict, generate_pdf его прочитает.
+    # Для PDF передаём данные по главному веществу как «верхний уровень» +
+    # массив всех веществ для секций "по веществам".
     result_dict = {
-        "points": points_for_pdf,
-        "max_c": max_c,
-        "max_lat": float(lats[max_idx]),
-        "max_lon": float(lons[max_idx]),
-        "source_results": src_results,
-        "exceeds_pdk": max_c > pdk,
+        "points": primary["points"],
+        "max_c": primary["max_c"],
+        "max_lat": primary["max_lat"],
+        "max_lon": primary["max_lon"],
+        "source_results": primary["source_results"],
+        "exceeds_pdk": primary["exceeds_pdk"],
         "pdk": pdk,
+        "by_substance": [
+            {
+                "code": code if code != "unknown" else None,
+                "substance": data.get("substance"),
+                "pdk": data["pdk"],
+                "max_c": data["max_c"],
+                "max_lat": data["max_lat"],
+                "max_lon": data["max_lon"],
+                "exceeds_pdk": data["exceeds_pdk"],
+                "ratio_to_pdk": data["ratio_to_pdk"],
+                "points": data["points"],
+                "source_results": data["source_results"],
+            }
+            for code, data in multi["by_substance"].items()
+        ],
+        "primary_code": primary_code if primary_code != "unknown" else None,
     }
 
     pdf_bytes = generate_pdf(request_dict, result_dict)

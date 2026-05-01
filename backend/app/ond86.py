@@ -383,3 +383,160 @@ def compute_szz_boundary(grid_lats, grid_lons, total_mg, pdk, center_lat, center
         "min_distance_m": round(min_distance, 1),
         "area_ha": round(area_ha, 2),
     }
+
+
+# ---------------------------------------------------------------------------
+# Многовеществный расчёт: один источник может выбрасывать N веществ.
+# Для каждого уникального вещества прогоняется отдельный compute_grid с
+# правильным emission_gs, и результаты собираются в словарь.
+# ---------------------------------------------------------------------------
+
+class _SubstanceSourceProxy:
+    """Лёгкий прокси: подсовывает compute_grid `get_emission_gs()` от одного вещества."""
+
+    __slots__ = ("name", "lat", "lon", "height", "diameter", "velocity",
+                 "temperature", "_emission_gs")
+
+    def __init__(self, src, emission_gs: float, name: str = None):
+        self.name = name or src.name
+        self.lat = src.lat
+        self.lon = src.lon
+        self.height = src.height
+        self.diameter = src.diameter
+        self.velocity = src.velocity
+        self.temperature = src.temperature
+        self._emission_gs = emission_gs
+
+    def get_emission_gs(self) -> float:
+        return self._emission_gs
+
+
+def compute_per_substance(sources, meteo, city_data, **grid_kwargs):
+    """
+    Делает по отдельному расчёту на каждое вещество.
+    Возвращает dict со структурой:
+
+      {
+        "by_substance": {
+          "<code>": {
+            "substance": {code, name, pdk_mr, hazard_class},
+            "pdk": float,
+            "max_c": float,
+            "max_lat": float,
+            "max_lon": float,
+            "exceeds_pdk": bool,
+            "ratio_to_pdk": float,
+            "source_results": [...],   # Cm/Xm на это вещество
+            "points": [{lat, lon, c}, ...],
+          },
+          ...
+        },
+        "primary_code": str,    # код вещества с худшим max_c/pdk
+        "lats": ndarray,        # общая сетка (одинаковая у всех веществ)
+        "lons": ndarray,
+      }
+    """
+    # Собираем все (источник, выброс) пары, группируем по коду вещества
+    substance_groups = {}  # code -> {"substance": meta, "pairs": [(src, emission_gs)]}
+    for src in sources:
+        for entry in src.get_emissions():
+            em_gs = entry.get_emission_gs()
+            if em_gs <= 0:
+                continue
+            code = entry.get_substance_code()
+            if code not in substance_groups:
+                substance_groups[code] = {
+                    "substance": entry.substance,
+                    "pdk": entry.get_pdk(),
+                    "pairs": [],
+                }
+            substance_groups[code]["pairs"].append((src, em_gs))
+            # Если ПДК на разных строках одного вещества разные —
+            # берём минимальный (самый строгий)
+            current_pdk = entry.get_pdk()
+            if current_pdk and current_pdk < substance_groups[code]["pdk"]:
+                substance_groups[code]["pdk"] = current_pdk
+
+    # Если ничего не задано — fallback к старой логике (один общий расчёт)
+    if not substance_groups:
+        lats, lons, total_mg, src_results = compute_grid(
+            sources=sources, meteo=meteo, city_data=city_data, **grid_kwargs,
+        )
+        max_idx = int(total_mg.argmax()) if len(total_mg) else 0
+        max_c = float(total_mg[max_idx]) if len(total_mg) else 0.0
+        return {
+            "by_substance": {
+                "unknown": {
+                    "substance": None,
+                    "pdk": 0.5,
+                    "max_c": max_c,
+                    "max_lat": float(lats[max_idx]) if len(lats) else 0.0,
+                    "max_lon": float(lons[max_idx]) if len(lons) else 0.0,
+                    "exceeds_pdk": max_c > 0.5,
+                    "ratio_to_pdk": max_c / 0.5 if max_c > 0 else 0.0,
+                    "source_results": src_results,
+                    "points": [
+                        {"lat": float(lats[i]), "lon": float(lons[i]), "c": float(total_mg[i])}
+                        for i in range(len(lats))
+                    ],
+                }
+            },
+            "primary_code": "unknown",
+            "lats": lats,
+            "lons": lons,
+        }
+
+    by_substance = {}
+    common_lats = None
+    common_lons = None
+
+    for code, group in substance_groups.items():
+        proxies = [_SubstanceSourceProxy(src, em_gs) for src, em_gs in group["pairs"]]
+        lats, lons, total_mg, src_results = compute_grid(
+            sources=proxies, meteo=meteo, city_data=city_data, **grid_kwargs,
+        )
+        if common_lats is None:
+            common_lats = lats
+            common_lons = lons
+
+        max_idx = int(total_mg.argmax()) if len(total_mg) else 0
+        max_c = float(total_mg[max_idx]) if len(total_mg) else 0.0
+        pdk_value = float(group["pdk"]) if group["pdk"] else 0.5
+
+        # Готовим метаданные вещества
+        sub_meta = group["substance"]
+        sub_dict = None
+        if sub_meta is not None:
+            sub_dict = {
+                "code": sub_meta.code,
+                "name": sub_meta.name,
+                "pdk_mr": sub_meta.pdk_mr,
+                "pdk_ss": sub_meta.pdk_ss,
+                "hazard_class": sub_meta.hazard_class,
+            }
+
+        by_substance[code] = {
+            "substance": sub_dict,
+            "pdk": pdk_value,
+            "max_c": max_c,
+            "max_lat": float(lats[max_idx]) if len(lats) else 0.0,
+            "max_lon": float(lons[max_idx]) if len(lons) else 0.0,
+            "exceeds_pdk": bool(max_c > pdk_value),
+            "ratio_to_pdk": (max_c / pdk_value) if pdk_value > 0 else 0.0,
+            "source_results": src_results,
+            "points": [
+                {"lat": float(lats[i]), "lon": float(lons[i]), "c": float(total_mg[i])}
+                for i in range(len(lats))
+            ],
+        }
+
+    # Главное вещество — с наибольшим отношением max_c / pdk
+    primary_code = max(by_substance.keys(),
+                       key=lambda k: by_substance[k]["ratio_to_pdk"])
+
+    return {
+        "by_substance": by_substance,
+        "primary_code": primary_code,
+        "lats": common_lats,
+        "lons": common_lons,
+    }

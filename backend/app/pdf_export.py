@@ -569,46 +569,80 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
         ),
     ))
 
-    # --- 5. График ---
-    story.append(Paragraph("5. Поле приземных концентраций", h1_style))
-    points = result_data.get("points", [])
-    if points:
-        grid_data = request_data.get("grid", {})
-        grid_step = grid_data.get("step", 500)
-        x_len = grid_data.get("x_length", 7000)
-        y_len = grid_data.get("y_length", 7000)
-        aspect = y_len / x_len if x_len > 0 else 1.0
-        sources_for_plot = request_data.get("sources") or []
-        boundary_for_plot = (request_data.get("enterprise") or {}).get("boundary") or []
-        # Название вещества для заголовка графика —
-        # сначала из request.substance, затем из первого источника
-        subst = request_data.get("substance") or {}
-        if not subst and sources_for_plot:
-            subst = (sources_for_plot[0] or {}).get("substance") or {}
-        subst_name = subst.get("name") or subst.get("code") or ""
-        plot_title = "Карта рассеивания ЗВ в приземном слое"
-        if subst_name:
-            plot_title = f"Карта рассеивания: {subst_name}"
+    # --- 5. Поля концентраций по веществам ---
+    from reportlab.platypus import PageBreak
+
+    grid_data = request_data.get("grid", {})
+    grid_step = grid_data.get("step", 500)
+    x_len = grid_data.get("x_length", 7000)
+    y_len = grid_data.get("y_length", 7000)
+    aspect = y_len / x_len if x_len > 0 else 1.0
+    sources_for_plot = request_data.get("sources") or []
+    boundary_for_plot = (request_data.get("enterprise") or {}).get("boundary") or []
+
+    by_subs = result_data.get("by_substance") or []
+    # Если по каким-то причинам by_substance пуст — делаем один синтетический «блок»
+    # из плоских полей result_data (для обратной совместимости со старыми вызовами).
+    if not by_subs:
+        flat_points = result_data.get("points", [])
+        if flat_points:
+            subst = request_data.get("substance") or {}
+            by_subs = [{
+                "code": subst.get("code"),
+                "substance": subst,
+                "pdk": result_data.get("pdk", 0.5),
+                "max_c": result_data.get("max_c", 0),
+                "exceeds_pdk": result_data.get("exceeds_pdk", False),
+                "points": flat_points,
+                "source_results": result_data.get("source_results", []),
+            }]
+
+    for sub_idx, sub in enumerate(by_subs):
+        sub_meta = sub.get("substance") or {}
+        sub_name = sub_meta.get("name") or sub.get("code") or f"Вещество {sub_idx + 1}"
+
+        if sub_idx > 0:
+            story.append(PageBreak())
+
+        story.append(Paragraph(
+            f"5.{sub_idx + 1}. Поле приземных концентраций — {sub_name}", h1_style
+        ))
+
+        sub_points = sub.get("points", [])
+        if not sub_points:
+            story.append(Paragraph("Нет данных для построения.", body_style))
+            continue
+
+        # Сводка по веществу
+        max_c = sub.get("max_c", 0)
+        sub_pdk = sub.get("pdk", 0.5)
+        exceeds = sub.get("exceeds_pdk", False)
+        ratio_text = f"{max_c / sub_pdk:.3f}" if sub_pdk > 0 else "—"
+        verdict = "⚠ Превышение ПДК" if exceeds else "✓ ПДК не превышена"
+        story.append(Paragraph(
+            f"<b>Cmax = {max_c:.4f} мг/м³</b> &nbsp; · &nbsp; "
+            f"ПДК м.р. = {sub_pdk:.3f} мг/м³ &nbsp; · &nbsp; "
+            f"Cmax/ПДК = {ratio_text} &nbsp; · &nbsp; {verdict}",
+            body_style,
+        ))
+        story.append(Spacer(1, 0.2 * cm))
+
+        # Карта рассеивания (декартова сетка)
         plot_buf = _make_concentration_plot(
-            points, grid_step=grid_step, grid_params=grid_data,
+            sub_points, grid_step=grid_step, grid_params=grid_data,
             sources=sources_for_plot, boundary=boundary_for_plot,
-            title=plot_title,
+            title=f"Карта рассеивания: {sub_name}",
         )
         img = RLImage(plot_buf, width=W, height=W * min(aspect, 1.2))
         story.append(img)
 
-        # --- 5b. Полярная картограмма по румбам и расстояниям ---
-        from reportlab.platypus import PageBreak
-        polar_title = "Концентрации по румбам и расстояниям"
-        if subst_name:
-            polar_title = f"Концентрации по румбам: {subst_name}"
+        # Полярная картограмма
         polar_buf = _make_polar_plot(
-            points, sources=sources_for_plot, pdk=result_data.get("pdk"),
-            title=polar_title,
+            sub_points, sources=sources_for_plot, pdk=sub_pdk,
+            title=f"Концентрации по румбам: {sub_name}",
         )
         if polar_buf is not None:
-            story.append(PageBreak())
-            story.append(Paragraph("6. Концентрации по румбам и расстояниям", h1_style))
+            story.append(Spacer(1, 0.3 * cm))
             polar_img = RLImage(polar_buf, width=W, height=W)
             story.append(polar_img)
             story.append(Paragraph(

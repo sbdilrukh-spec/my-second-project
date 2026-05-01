@@ -95,17 +95,24 @@ export default function TableInput({ sources, onChange, onAdd, onRemove, t }) {
             {sources.map((src, i) => (
               <tr key={i}>
                 <td style={tdStyle}>{i + 1}</td>
-                {COLUMNS.map((col) => (
+                {COLUMNS.map((col) => {
+                  // Поля выбросов теперь живут в src.emissions[0]; остальное — на верхнем уровне
+                  const isEmissionKey = col.key === "emission_gs" || col.key === "emission_ty";
+                  const val = isEmissionKey
+                    ? (src.emissions?.[0]?.[col.key] ?? "")
+                    : (src[col.key] ?? "");
+                  return (
                   <td key={col.key} style={tdStyle}>
                     <input
                       type={col.type}
                       step="any"
-                      value={src[col.key] ?? ""}
+                      value={val}
                       onChange={(e) => handleCellChange(i, col.key, e.target.value)}
                       style={inputStyle}
                     />
                   </td>
-                ))}
+                  );
+                })}
                 <td style={tdStyle}>
                   <button
                     onClick={() => onRemove(i)}
