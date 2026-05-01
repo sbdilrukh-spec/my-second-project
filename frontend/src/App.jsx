@@ -240,21 +240,36 @@ export default function App() {
   const handleBoundaryChange = (newBoundary) => {
     setEnterprise((prev) => ({ ...prev, boundary: newBoundary }));
 
-    // Если контур задан и источник #1 всё ещё в координатах "по умолчанию"
-    // (центр текущего города) — автоматически переносим его в центроид контура,
-    // чтобы он не висел далеко от площадки.
+    // Когда контур задан, переносим в центроид все источники,
+    // которые ещё стоят в координатах "по умолчанию" (центр текущего города).
+    // Если пользователь уже двигал источник — оставляем где есть.
     if (!newBoundary || newBoundary.length === 0) return;
     const cLat = newBoundary.reduce((s, p) => s + (p.lat || 0), 0) / newBoundary.length;
     const cLon = newBoundary.reduce((s, p) => s + (p.lon || 0), 0) / newBoundary.length;
     const city = cities.find((c) => c.name === meteo.city);
-    setSources((prev) => prev.map((src, i) => {
-      if (i !== 0) return src;
+    setSources((prev) => prev.map((src) => {
       const isAtCityDefault =
         city &&
         Math.abs((src.lat ?? 0) - city.lat) < 1e-4 &&
         Math.abs((src.lon ?? 0) - city.lon) < 1e-4;
       return isAtCityDefault ? { ...src, lat: cLat, lon: cLon } : src;
     }));
+  };
+
+  // Принудительный перенос всех источников в центроид контура —
+  // используется кнопкой "Переместить все источники в контур".
+  // В отличие от авто-снапа, двигает источники независимо от того,
+  // где они стоят сейчас.
+  const handleSnapSourcesToBoundary = () => {
+    const b = enterprise.boundary;
+    if (!b || b.length === 0) {
+      setError("Сначала задайте контур предприятия в модуле «🏭 Координаты предприятия».");
+      return;
+    }
+    const cLat = b.reduce((s, p) => s + (p.lat || 0), 0) / b.length;
+    const cLon = b.reduce((s, p) => s + (p.lon || 0), 0) / b.length;
+    if (!window.confirm(`Переместить все ${sources.length} источников в центр контура?`)) return;
+    setSources((prev) => prev.map((src) => ({ ...src, lat: cLat, lon: cLon })));
   };
 
   const handleSourceDrag = (index, lat, lon) => {
@@ -354,7 +369,10 @@ export default function App() {
       const pdk = Math.min(...sources.map(s => s.pdk ?? 0.5));
       const payload = { sources, meteo, grid, pdk };
       const res = await calculate(payload);
-      setResult(res);
+      // Замораживаем в результате вещество, с которым считали — иначе при смене
+      // выбора в дропдауне заголовок съезжает, а цифры остаются от старого расчёта.
+      const substanceAtCalc = sources[0]?.substance || selectedSubstance || null;
+      setResult({ ...res, _substance: substanceAtCalc, _pdk: pdk });
     } catch (e) {
       const detail = e?.response?.data?.detail;
       if (Array.isArray(detail)) {
@@ -544,6 +562,18 @@ export default function App() {
               </div>
             </div>
 
+            {/* Кнопка "Переместить все источники в контур" — видна только когда контур задан */}
+            {enterprise.boundary?.length >= 3 && sources.length > 0 && (
+              <button
+                className="btn-secondary btn-sm"
+                style={{ width: "100%", marginTop: 6, fontSize: 11, color: "#7C2D12", borderColor: "#FED7AA" }}
+                onClick={handleSnapSourcesToBoundary}
+                title="Установит все источники в центроид контура"
+              >
+                🎯 Переместить все источники в контур
+              </button>
+            )}
+
             {inputMode === "cards" ? (
               <>
                 <button className="btn-secondary btn-sm" style={{ width: "100%", marginTop: 6 }} onClick={handleAddSource}>
@@ -587,12 +617,32 @@ export default function App() {
                 const spacing = 0.002; // ~200м между источниками
                 const cols = Math.ceil(Math.sqrt(imported.length));
 
+                // Находит вещество по коду или названию из импорта.
+                // Сначала по коду (точное совпадение), потом по названию (case-insensitive).
+                const findSubstance = (code, name) => {
+                  if (code) {
+                    const byCode = allSubstances.find(s => String(s.code) === String(code));
+                    if (byCode) return byCode;
+                  }
+                  if (name) {
+                    const lcName = String(name).trim().toLowerCase();
+                    const byName = allSubstances.find(s => (s.name || "").toLowerCase() === lcName);
+                    if (byName) return byName;
+                  }
+                  return null;
+                };
+
                 setSources((prev) => [...prev, ...imported.map((s, i) => {
                   // Авторасстановка по сетке если нет координат
                   const row = Math.floor(i / cols);
                   const col = i % cols;
                   const autoLat = centerLat + (row - Math.floor(cols / 2)) * spacing;
                   const autoLon = centerLon + (col - Math.floor(cols / 2)) * spacing;
+
+                  // Подтягиваем вещество из импорта (колонки "Код вещества" / "Название вещества"),
+                  // если не нашли — fallback к глобально выбранному.
+                  const importedSub = findSubstance(s.substance_code, s.substance_name);
+                  const subForSource = importedSub || selectedSubstance || null;
 
                   return {
                     name: s.name || `Источник ${prev.length + i + 1}`,
@@ -604,8 +654,8 @@ export default function App() {
                     temperature: s.temperature || 120,
                     emission_gs: s.emission_gs || null,
                     emission_ty: s.emission_ty || null,
-                    pdk: selectedSubstance?.pdk_mr ?? 0.5,
-                    substance: selectedSubstance || null,
+                    pdk: subForSource?.pdk_mr ?? 0.5,
+                    substance: subForSource,
                   };
                 })]);
               }}
@@ -773,7 +823,7 @@ export default function App() {
           currentPdk={Math.min(...sources.map(s => s.pdk ?? 0.5))}
           meteo={meteo}
           enterprise={enterprise}
-          substance={sources[0]?.substance || selectedSubstance}
+          substance={result?._substance || sources[0]?.substance || selectedSubstance}
         />
       </main>
 
