@@ -158,8 +158,8 @@ def parse_excel(file_bytes: bytes) -> List[Dict[str, Any]]:
 
 def generate_template_csv() -> str:
     """Генерирует CSV-шаблон для импорта (с BOM для Excel)."""
-    header = "Название;Высота (H), м;Диаметр (D), м;Скорость (w0), м/с;Температура (Tг), °C;Выброс (M), г/с;Выброс, т/год;Широта;Долгота"
-    example = "Труба ТЭЦ-1;45;1.2;12.0;180;8.5;268.06;41.2995;69.2401"
+    header = "Название;Код вещества;Высота (H), м;Диаметр (D), м;Скорость (w0), м/с;Температура (Tг), °C;Выброс (M), г/с;Выброс, т/год;Широта;Долгота"
+    example = "Труба ТЭЦ-1;0301;45;1.2;12.0;180;8.5;268.06;41.2995;69.2401"
     return f"{header}\n{example}\n"
 
 
@@ -173,7 +173,7 @@ def generate_template_xlsx() -> bytes:
     ws.title = "Источники"
 
     headers = [
-        "№", "Код вещества", "Название вещества", "Высота (H), м", "Диаметр (D), м",
+        "№", "Код вещества", "Высота (H), м", "Диаметр (D), м",
         "Скорость (w0), м/с", "Температура (Tг), °C",
         "Выброс (M), г/с", "Выброс, т/год",
     ]
@@ -192,7 +192,7 @@ def generate_template_xlsx() -> bytes:
         cell.alignment = Alignment(horizontal="center", wrap_text=True)
         cell.border = thin_border
 
-    example = [1, "0301", "Азота диоксид (NO2)", 45, 1.2, 12.0, 180, 8.5, 268.06]
+    example = [1, "0301", 45, 1.2, 12.0, 180, 8.5, 268.06]
     for col, val in enumerate(example, 1):
         cell = ws.cell(row=2, column=col, value=val)
         cell.border = thin_border
