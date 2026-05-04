@@ -152,6 +152,11 @@ export default function App() {
   const [showSubstanceEditor, setShowSubstanceEditor] = useState(false);
   // Enterprise boundary editor modal
   const [showBoundaryEditor, setShowBoundaryEditor] = useState(false);
+  // Триггер-счётчик: при изменении карта приближается к контуру предприятия
+  const [fitMapTrigger, setFitMapTrigger] = useState(0);
+  const requestFitToBoundary = useCallback(() => {
+    setFitMapTrigger((c) => c + 1);
+  }, []);
 
   const reloadSubstances = useCallback(() => {
     fetchSubstances()
@@ -976,6 +981,7 @@ export default function App() {
           meteo={meteo}
           enterprise={enterprise}
           substance={displayedResult?._substance || sources[0]?.emissions?.[0]?.substance || selectedSubstance}
+          fitMapTrigger={fitMapTrigger}
         />
       </main>
 
@@ -996,6 +1002,11 @@ export default function App() {
           onChange={handleBoundaryChange}
           picking={pickingEnterprise}
           onTogglePicking={handleToggleBoundaryPicking}
+          onFitMap={() => {
+            requestFitToBoundary();
+            setShowBoundaryEditor(false);
+            setPickingEnterprise(false);
+          }}
           onClose={() => {
             setShowBoundaryEditor(false);
             setPickingEnterprise(false);

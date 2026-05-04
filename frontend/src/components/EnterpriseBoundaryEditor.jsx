@@ -72,7 +72,7 @@ function parseImportText(text) {
 }
 
 export default function EnterpriseBoundaryEditor({
-  boundary, onChange, picking, onTogglePicking, onClose, t,
+  boundary, onChange, picking, onTogglePicking, onFitMap, onClose, t,
 }) {
   const [importText, setImportText] = useState("");
   const [importError, setImportError] = useState(null);
@@ -120,6 +120,8 @@ export default function EnterpriseBoundaryEditor({
     setImportPreview(null);
     setImportError(null);
     setShowImport(false);
+    // После подтверждения импорта — приближаем карту к контуру и закрываем модал
+    if (onFitMap) onFitMap();
   };
 
   const handleCancelImport = () => {
@@ -187,6 +189,16 @@ export default function EnterpriseBoundaryEditor({
           <button className="btn-secondary btn-sm" onClick={() => setShowImport((v) => !v)}>
             📥 {t.importCsv}
           </button>
+          {boundary.length > 0 && onFitMap && (
+            <button
+              className="btn-secondary btn-sm"
+              onClick={onFitMap}
+              style={{ background: "#ECFDF5", color: "#047857", borderColor: "#A7F3D0" }}
+              title="Закрыть это окно и показать контур на карте"
+            >
+              🎯 На карте
+            </button>
+          )}
           <button
             className="btn-secondary btn-sm"
             style={{ marginLeft: "auto", color: "#DC2626", borderColor: "#FCA5A5" }}

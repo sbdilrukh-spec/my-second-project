@@ -591,6 +591,31 @@ function RecenterMap({ center }) {
   return null;
 }
 
+// ─── Принудительное приближение к контуру предприятия ───────────────────────
+// Срабатывает по триггер-счётчику (увеличивается извне).
+function FitToBoundary({ boundary, trigger }) {
+  const map = useMap();
+  const lastTrigger = useRef(0);
+  useEffect(() => {
+    if (trigger === 0 || trigger === lastTrigger.current) return;
+    lastTrigger.current = trigger;
+    if (!boundary || boundary.length === 0) return;
+    const valid = boundary.filter((p) =>
+      Number.isFinite(p?.lat) && Number.isFinite(p?.lon) &&
+      Math.abs(p.lat) > 0.01 && Math.abs(p.lon) > 0.01 &&
+      Math.abs(p.lat) <= 90 && Math.abs(p.lon) <= 180
+    );
+    if (valid.length === 0) return;
+    if (valid.length === 1) {
+      map.setView([valid[0].lat, valid[0].lon], 16);
+    } else {
+      const bounds = L.latLngBounds(valid.map((p) => [p.lat, p.lon]));
+      map.fitBounds(bounds, { padding: [40, 40], maxZoom: 17 });
+    }
+  }, [trigger, boundary, map]);
+  return null;
+}
+
 // ─── Тайловые слои ────────────────────────────────────────────────────────────
 const TILES = {
   osm: {
@@ -611,6 +636,7 @@ export default function MapView({
   viewMode, onViewModeChange, gridStep, gridXLength, gridYLength,
   sourceOffsetX, sourceOffsetY, currentPdk,
   meteo, enterprise, substance,
+  fitMapTrigger,
 }) {
   const [mapType, setMapType] = useState("satellite");
   const [bgImage, setBgImage] = useState(null);
@@ -666,6 +692,7 @@ export default function MapView({
       )}
 
       <RecenterMap center={cityCenter} />
+      <FitToBoundary boundary={enterprise?.boundary} trigger={fitMapTrigger || 0} />
       <ClickHandler
         pickingIndex={pickingIndex}
         onPick={onPick}
