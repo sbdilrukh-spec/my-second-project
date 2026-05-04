@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from "react";
-import { addSubstance, updateSubstance, deleteSubstance } from "../api.js";
+import { addSubstance, updateSubstance, deleteSubstance, restoreDefaultSubstances } from "../api.js";
 
 const EMPTY_FORM = {
   code: "",
@@ -116,7 +116,13 @@ export default function SubstanceEditor({ substances, onSubstancesChanged, onClo
 
   // --- Delete ---
   const handleDelete = async (sub) => {
-    const msg = t.confirmDelete.replace("{name}", sub.name);
+    // Для встроенных веществ показываем дополнительное предупреждение —
+    // действие можно отменить через "Восстановить встроенные".
+    let msg = t.confirmDelete.replace("{name}", sub.name);
+    if (!sub.custom) {
+      msg = `${msg}\n\nЭто встроенное вещество. Оно будет скрыто из вашего списка. ` +
+            `Вернуть все встроенные обратно можно кнопкой «Восстановить встроенные» в этом окне.`;
+    }
     if (!window.confirm(msg)) return;
 
     try {
@@ -131,6 +137,18 @@ export default function SubstanceEditor({ substances, onSubstancesChanged, onClo
 
   const handleFieldChange = (key, value) => {
     setFormData((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const handleRestoreDefaults = async () => {
+    if (!window.confirm("Вернуть все скрытые встроенные вещества обратно в список?")) return;
+    try {
+      await restoreDefaultSubstances();
+      showSuccess("Встроенные вещества восстановлены");
+      onSubstancesChanged();
+    } catch (e) {
+      const detail = e?.response?.data?.detail;
+      setError(detail || e?.message || "Error");
+    }
   };
 
   // --- Inline form for add / edit ---
@@ -254,6 +272,13 @@ export default function SubstanceEditor({ substances, onSubstancesChanged, onClo
           <button className="btn-primary btn-sm" onClick={handleOpenAdd}>
             + {t.addSubstance}
           </button>
+          <button
+            className="btn-secondary btn-sm"
+            onClick={handleRestoreDefaults}
+            title="Вернуть все скрытые встроенные вещества"
+          >
+            ↩ Восстановить встроенные
+          </button>
         </div>
 
         {successMsg && <div className="se-success">{successMsg}</div>}
@@ -307,15 +332,13 @@ export default function SubstanceEditor({ substances, onSubstancesChanged, onClo
                       >
                         {t.editSubstance}
                       </button>
-                      {sub.custom && (
-                        <button
-                          className="btn-danger btn-sm"
-                          onClick={() => handleDelete(sub)}
-                          title={t.deleteSubstance}
-                        >
-                          {t.deleteSubstance}
-                        </button>
-                      )}
+                      <button
+                        className="btn-danger btn-sm"
+                        onClick={() => handleDelete(sub)}
+                        title={sub.custom ? t.deleteSubstance : "Скрыть встроенное вещество"}
+                      >
+                        {t.deleteSubstance}
+                      </button>
                     </td>
                   </tr>
                 )

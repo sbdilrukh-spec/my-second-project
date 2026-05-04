@@ -27,6 +27,11 @@ export async function deleteSubstance(code) {
   return res.data;
 }
 
+export async function restoreDefaultSubstances() {
+  const res = await axios.post(`${BASE}/substances/restore-defaults`);
+  return res.data;
+}
+
 export async function fetchWeather(lat, lon) {
   const res = await axios.get(`${BASE}/weather`, { params: { lat, lon } });
   return res.data;

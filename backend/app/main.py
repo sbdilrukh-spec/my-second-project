@@ -26,6 +26,7 @@ from .import_sources import parse_csv, parse_excel, generate_template_csv, gener
 # ---------------------------------------------------------------------------
 
 CUSTOM_SUBSTANCES_PATH = os.path.join(os.path.dirname(__file__), "custom_substances.json")
+HIDDEN_SUBSTANCES_PATH = os.path.join(os.path.dirname(__file__), "hidden_substances.json")
 
 
 def _load_custom_substances() -> list:
@@ -45,11 +46,35 @@ def _save_custom_substances(data: list):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+def _load_hidden_codes() -> list:
+    """Список кодов встроенных веществ, которые пользователь скрыл."""
+    if not os.path.exists(HIDDEN_SUBSTANCES_PATH):
+        return []
+    try:
+        with open(HIDDEN_SUBSTANCES_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                return [str(c) for c in data]
+            return []
+    except (json.JSONDecodeError, IOError):
+        return []
+
+
+def _save_hidden_codes(codes: list):
+    with open(HIDDEN_SUBSTANCES_PATH, "w", encoding="utf-8") as f:
+        json.dump(list(codes), f, ensure_ascii=False, indent=2)
+
+
 def _get_all_substances() -> list:
-    """Merge built-in SUBSTANCES with custom ones. Custom override built-in by code."""
+    """Merge built-in SUBSTANCES with custom ones, исключая скрытые встроенные.
+    Custom override built-in by code."""
     custom = _load_custom_substances()
+    hidden = set(_load_hidden_codes())
     custom_codes = {s["code"] for s in custom}
-    merged = [s for s in SUBSTANCES if s["code"] not in custom_codes]
+    merged = [
+        s for s in SUBSTANCES
+        if s["code"] not in custom_codes and s["code"] not in hidden
+    ]
     merged.extend(custom)
     return merged
 
@@ -167,16 +192,29 @@ def delete_substance(code: str):
     if not builtin and not existing_custom:
         raise HTTPException(status_code=404, detail=f"Вещество с кодом '{code}' не найдено")
 
-    if builtin and not existing_custom:
-        raise HTTPException(
-            status_code=400,
-            detail="Нельзя удалить встроенное вещество. Его можно только редактировать."
-        )
+    # Удаляем кастомную запись (если была)
+    if existing_custom:
+        custom = [s for s in custom if s["code"] != code]
+        _save_custom_substances(custom)
 
-    # Remove from custom list
-    custom = [s for s in custom if s["code"] != code]
-    _save_custom_substances(custom)
-    return {"ok": True, "deleted": code}
+    # Если есть встроенный аналог с тем же кодом — добавляем в список скрытых,
+    # чтобы он не возвращался обратно в результате _get_all_substances().
+    if builtin:
+        hidden = set(_load_hidden_codes())
+        hidden.add(code)
+        _save_hidden_codes(sorted(hidden))
+
+    return {"ok": True, "deleted": code, "hidden_builtin": bool(builtin)}
+
+
+# ---------------------------------------------------------------------------
+# POST /api/substances/restore-defaults  — вернуть все скрытые встроенные
+# ---------------------------------------------------------------------------
+
+@app.post("/api/substances/restore-defaults")
+def restore_default_substances():
+    _save_hidden_codes([])
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
