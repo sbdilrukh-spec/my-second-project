@@ -538,7 +538,7 @@ function ViewToggle({ mode, onChange }) {
     transition: "all 0.15s",
   };
   return (
-    <div style={{
+    <div className="pdf-snapshot-hide" style={{
       position: "absolute", top: 10, right: 50, zIndex: 1000,
       display: "flex", gap: 4, background: "rgba(255,255,255,0.92)",
       borderRadius: 8, padding: "4px", boxShadow: "0 2px 8px rgba(0,0,0,0.2)",
@@ -807,7 +807,7 @@ export default function MapView({
       )}
 
       {/* Тип карты + загрузка подложки */}
-      <div style={{
+      <div className="pdf-snapshot-hide" style={{
         position: "absolute", bottom: 30, left: 10, zIndex: 1000,
         display: "flex", gap: 4, background: "rgba(255,255,255,0.92)",
         borderRadius: 8, padding: 4, boxShadow: "0 2px 6px rgba(0,0,0,0.2)",

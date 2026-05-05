@@ -653,20 +653,6 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
             snap_img = RLImage(snap_buf, width=disp_w, height=disp_h)
             story.append(snap_img)
 
-            # Таблица с координатами контура (если задан)
-            if boundary:
-                story.append(Spacer(1, 0.3 * cm))
-                story.append(Paragraph("Координаты вершин контура площадки", h1_style))
-                bnd_rows = [["№", "Широта", "Долгота"]]
-                for i, p in enumerate(boundary, 1):
-                    bnd_rows.append([
-                        str(i),
-                        f"{p.get('lat', 0):.6f}",
-                        f"{p.get('lon', 0):.6f}",
-                    ])
-                tb = Table(bnd_rows, colWidths=[W * 0.15, W * 0.425, W * 0.425])
-                tb.setStyle(TABLE_STYLE)
-                story.append(tb)
         except Exception as e:
             # Снимок битый — просто пропускаем секцию, не валим весь PDF
             print(f"[pdf_export] Не удалось встроить снимок карты: {e}")

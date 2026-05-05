@@ -525,6 +525,18 @@ export default function App() {
         y: 0,
         width: mapEl.clientWidth,
         height: mapEl.clientHeight,
+        // В PDF не должны попадать кнопки управления, attribution и т.п.
+        // Прячем все Leaflet-контролы и элементы с классом pdf-snapshot-hide.
+        ignoreElements: (el) => {
+          if (!el.classList) return false;
+          return (
+            el.classList.contains("pdf-snapshot-hide") ||
+            el.classList.contains("leaflet-control") ||
+            el.classList.contains("leaflet-control-zoom") ||
+            el.classList.contains("leaflet-control-attribution") ||
+            el.classList.contains("leaflet-control-container")
+          );
+        },
       });
       // JPEG quality 0.92 — для фотографического спутника это сжимает
       // в 5–10 раз без видимой потери. PNG для такого контента
