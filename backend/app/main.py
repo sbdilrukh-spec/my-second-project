@@ -15,7 +15,7 @@ from .models import (
 )
 from .meteo_data import CITIES
 from .ond86 import compute_grid, compute_szz_boundary, compute_per_substance
-from .pdf_export import generate_pdf
+from .pdf_export import generate_pdf, _make_transparent_dispersion_map
 from .substances import SUBSTANCES
 from .tables import generate_pdv_tables, generate_ovos_tables
 from .import_sources import parse_csv, parse_excel, generate_template_csv, generate_template_xlsx
@@ -651,6 +651,117 @@ def export_excel(req: CalculationRequest):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
+
+
+# ---------------------------------------------------------------------------
+# POST /api/export/map-png  — ZIP с прозрачными PNG карт рассеивания
+# (по одному файлу на каждое вещество, для наложения в CorelDraw)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/export/map-png")
+def export_map_png(req: CalculationRequest):
+    import zipfile
+    import re
+    import traceback
+
+    try:
+        # Берём готовые результаты с фронта или считаем заново
+        if req.precomputed_result and isinstance(req.precomputed_result, dict):
+            res = req.precomputed_result
+            by_substance_data = res.get("by_substance") or []
+        else:
+            city_data = CITIES.get(req.meteo.city, {"A": 200})
+            multi = compute_per_substance(
+                sources=req.sources, meteo=req.meteo,
+                city_data=city_data, **_grid_kwargs(req.grid),
+            )
+            by_substance_data = []
+            for code, data in multi["by_substance"].items():
+                sub_meta = data.get("substance") or {}
+                by_substance_data.append({
+                    "code": code if code != "unknown" else None,
+                    "substance": sub_meta if isinstance(sub_meta, dict) else {
+                        "code": getattr(sub_meta, "code", None),
+                        "name": getattr(sub_meta, "name", None),
+                    },
+                    "pdk": data["pdk"],
+                    "points": data["points"],
+                })
+
+        if not by_substance_data:
+            raise HTTPException(status_code=400, detail="Нет данных для построения карт. Сначала выполните расчёт.")
+
+        # Конвертируем источники в простые dict (Pydantic модели или dict)
+        sources_for_map = []
+        for src in req.sources:
+            try:
+                sources_for_map.append({"lat": src.lat, "lon": src.lon, "name": src.name})
+            except AttributeError:
+                if isinstance(src, dict):
+                    sources_for_map.append({
+                        "lat": src.get("lat"), "lon": src.get("lon"), "name": src.get("name", "")
+                    })
+
+        boundary = []
+        if req.enterprise and req.enterprise.boundary:
+            for p in req.enterprise.boundary:
+                try:
+                    boundary.append({"lat": p.lat, "lon": p.lon})
+                except AttributeError:
+                    if isinstance(p, dict):
+                        boundary.append({"lat": p.get("lat"), "lon": p.get("lon")})
+
+        grid_data = req.grid.model_dump() if req.grid else {}
+
+        # Создаём ZIP в памяти
+        zip_buf = io.BytesIO()
+        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for idx, sub in enumerate(by_substance_data):
+                if isinstance(sub, dict):
+                    sub_meta = sub.get("substance") or {}
+                    sub_name = sub_meta.get("name") if isinstance(sub_meta, dict) else None
+                    sub_name = sub_name or sub.get("code") or f"вещество-{idx+1}"
+                    sub_pdk = sub.get("pdk") or 0.5
+                    sub_points = sub.get("points") or []
+                else:
+                    continue
+
+                if not sub_points:
+                    continue
+
+                png_buf = _make_transparent_dispersion_map(
+                    sub_points,
+                    sources=sources_for_map,
+                    boundary=boundary,
+                    pdk=sub_pdk,
+                    substance_name=sub_name,
+                    show_axes=False,   # для CorelDraw — без осей
+                    show_title=False,  # без заголовка
+                    grid_data=grid_data,
+                )
+                if png_buf is None:
+                    continue
+
+                # Безопасное имя файла
+                safe_name = re.sub(r"[^A-Za-zА-Яа-я0-9_-]+", "_", sub_name).strip("_") or f"map_{idx+1}"
+                fname = f"karta-rasseivaniya_{safe_name}.png"
+                zf.writestr(fname, png_buf.getvalue())
+
+        zip_buf.seek(0)
+        return StreamingResponse(
+            zip_buf,
+            media_type="application/zip",
+            headers={"Content-Disposition": "attachment; filename=karty-rasseivaniya.zip"},
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Ошибка генерации карт PNG: {type(e).__name__}: {str(e)[:500]}"
+        )
 
 
 # ---------------------------------------------------------------------------

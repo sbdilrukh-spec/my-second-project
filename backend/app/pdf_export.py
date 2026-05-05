@@ -433,6 +433,195 @@ def _make_polar_plot(points_data: list, sources: list = None,
 
 
 # ---------------------------------------------------------------------------
+# Прозрачная карта рассеивания — для наложения в CorelDraw на свою подложку
+# ---------------------------------------------------------------------------
+
+def _make_transparent_dispersion_map(
+    points_data: list,
+    sources: list = None,
+    boundary: list = None,
+    pdk: float = 0.5,
+    substance_name: str = "",
+    show_axes: bool = False,
+    show_title: bool = False,
+    grid_data: dict = None,
+):
+    """
+    Рендерит карту рассеивания на прозрачном фоне:
+      - изолинии в долях ПДК с подписями
+      - заливка между уровнями (полупрозрачная)
+      - источники как пронумерованные кружки
+      - контур площадки как оранжевая линия
+      - изолиния 1.0 ПДК — выделена
+    Без осей и заголовка по умолчанию — для наложения в CorelDraw.
+    Возвращает io.BytesIO с PNG.
+    """
+    if not points_data:
+        return None
+
+    lats = np.array([p["lat"] for p in points_data])
+    lons = np.array([p["lon"] for p in points_data])
+    conc = np.array([p["c"] for p in points_data])
+
+    # Размеры расчётной сетки в метрах
+    if grid_data:
+        x_length = float(grid_data.get("x_length", 7000))
+        y_length = float(grid_data.get("y_length", 7000))
+        grid_step = float(grid_data.get("step", 500))
+    else:
+        x_length = 7000.0
+        y_length = 7000.0
+        grid_step = 500.0
+
+    # Левый-нижний угол сетки в географических координатах
+    origin_lat = float(np.min(lats))
+    origin_lon = float(np.min(lons))
+    lat_rad = origin_lat * np.pi / 180.0
+
+    # Точки сетки → метры от origin
+    dx_e = (lons - origin_lon) * 111_000.0 * np.cos(lat_rad)
+    dy_n = (lats - origin_lat) * 111_000.0
+
+    # Регулярная 2D-сетка для contour/contourf
+    n_x = int(round(x_length / grid_step)) + 1
+    n_y = int(round(y_length / grid_step)) + 1
+    xi = np.linspace(0.0, x_length, n_x)
+    yi = np.linspace(0.0, y_length, n_y)
+    XI, YI = np.meshgrid(xi, yi)
+    ZI = np.zeros((n_y, n_x))
+    for x_m, y_m, c_v in zip(dx_e, dy_n, conc):
+        ix = int(round(x_m / grid_step))
+        iy = int(round(y_m / grid_step))
+        if 0 <= ix < n_x and 0 <= iy < n_y:
+            ZI[iy, ix] = c_v
+
+    # Концентрация в долях ПДК
+    if pdk and pdk > 0:
+        Z_pdk = ZI / pdk
+    else:
+        Z_pdk = ZI
+    z_max = float(Z_pdk.max())
+    if z_max <= 0:
+        return None
+
+    # Уровни изолиний по ТЗ
+    iso_levels = [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 0.6, 0.8, 1.0, 2.0, 5.0]
+    iso_levels = [lv for lv in iso_levels if lv <= z_max * 1.1 and lv > 0]
+    if len(iso_levels) < 2:
+        iso_levels = [z_max * 0.3, z_max * 0.6, z_max] if z_max > 0 else [0.5, 1.0]
+
+    # Размер фигуры пропорционален сетке
+    aspect = y_length / x_length if x_length > 0 else 1.0
+    fig_w = 12
+    fig_h = max(4, fig_w * aspect)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), facecolor="none")
+    ax.set_facecolor("none")
+
+    # Заливка между изолиниями (полупрозрачная розово-красная палитра)
+    fill_colors = [
+        "#FFE4E1", "#FFCCCC", "#FF9999", "#FF7777",
+        "#F87171", "#EF4444", "#DC2626", "#B91C1C",
+        "#991B1B", "#7F1D1D",
+    ]
+    fill_levels = [0.0] + list(iso_levels)
+    cf = ax.contourf(
+        XI, YI, Z_pdk, levels=fill_levels,
+        colors=fill_colors[:len(fill_levels) - 1],
+        alpha=0.45, extend="max",
+    )
+
+    # Линии изолиний — поверх заливки, более насыщенные
+    cl = ax.contour(
+        XI, YI, Z_pdk, levels=iso_levels,
+        colors="#7F1D1D", linewidths=0.9, alpha=0.95,
+    )
+    # Подписи на линиях с белой обводкой текста — читаются на любом фоне
+    labels = ax.clabel(cl, inline=True, fontsize=8, fmt=lambda v: f"{v:g} ПДК")
+    for lab in labels or []:
+        lab.set_path_effects([])  # сброс
+    # Перерисовываем подписи белой обводкой через PathEffect
+    try:
+        import matplotlib.patheffects as pe
+        for lab in labels or []:
+            lab.set_path_effects([
+                pe.Stroke(linewidth=2.5, foreground="white"),
+                pe.Normal(),
+            ])
+    except Exception:
+        pass
+
+    # Изолиния 1.0 ПДК — выделена
+    if any(abs(lv - 1.0) < 1e-6 for lv in iso_levels):
+        cl_one = ax.contour(
+            XI, YI, Z_pdk, levels=[1.0],
+            colors="#DC2626", linewidths=2.4,
+        )
+        try:
+            ax.clabel(cl_one, inline=True, fontsize=10, fmt=lambda v: "1,0 ПДК")
+        except Exception:
+            pass
+
+    # Источники — пронумерованные кружки
+    if sources:
+        for i, src in enumerate(sources):
+            try:
+                sx = (float(src["lon"]) - origin_lon) * 111_000.0 * np.cos(lat_rad)
+                sy = (float(src["lat"]) - origin_lat) * 111_000.0
+            except (KeyError, TypeError, ValueError):
+                continue
+            ax.plot(sx, sy, "o", color="#7C2D12", markersize=12,
+                    markeredgecolor="white", markeredgewidth=1.5, zorder=10)
+            ax.text(sx, sy, str(i + 1), color="white", fontsize=8,
+                    fontweight="bold", ha="center", va="center", zorder=11)
+
+    # Контур площадки — оранжевая линия
+    if boundary and len(boundary) >= 2:
+        bx, by = [], []
+        for p in boundary:
+            try:
+                bx.append((float(p["lon"]) - origin_lon) * 111_000.0 * np.cos(lat_rad))
+                by.append((float(p["lat"]) - origin_lat) * 111_000.0)
+            except (KeyError, TypeError, ValueError):
+                continue
+        if len(bx) >= 3:
+            bx.append(bx[0])
+            by.append(by[0])
+        if len(bx) >= 2:
+            ax.plot(bx, by, color="#EA580C", linewidth=1.8,
+                    solid_capstyle="round", zorder=8)
+
+    ax.set_xlim(0, x_length)
+    ax.set_ylim(0, y_length)
+    ax.set_aspect("equal")
+
+    if show_axes:
+        ax.set_xlabel("X, м", fontsize=9)
+        ax.set_ylabel("Y, м", fontsize=9)
+        ax.tick_params(labelsize=8)
+        ax.grid(True, alpha=0.3, linestyle="--", color="#888")
+    else:
+        ax.set_axis_off()
+
+    if show_title and substance_name:
+        ax.set_title(
+            f"Карта приземных концентраций {substance_name}, доли ПДК",
+            fontsize=11, fontweight="bold", pad=8,
+        )
+
+    fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+    buf = io.BytesIO()
+    fig.savefig(
+        buf, format="png", dpi=150,
+        bbox_inches="tight" if (show_axes or show_title) else None,
+        pad_inches=0.05 if (show_axes or show_title) else 0,
+        transparent=True,
+    )
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+# ---------------------------------------------------------------------------
 # Основная функция генерации PDF
 # ---------------------------------------------------------------------------
 
@@ -622,73 +811,79 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
         story.append(sub_tbl)
         story.append(Spacer(1, 0.4 * cm))
 
-    # --- 6. Карты рассеивания на местности (по одной странице на вещество) ---
+    # --- 6. Карты рассеивания (прозрачные, для наложения в CorelDraw) ---
     from reportlab.platypus import PageBreak
 
     enterprise = request_data.get("enterprise") or {}
     boundary = (enterprise.get("boundary") or [])
     ent_name = enterprise.get("name") or "—"
 
-    # Новая форма: массив map_snapshots = [{code, name, snapshot}, ...]
-    # Старая (одиночный map_snapshot) тоже поддерживается — превращаем в массив из 1.
-    snapshots_list = request_data.get("map_snapshots")
-    if not snapshots_list:
-        single = request_data.get("map_snapshot")
-        if single:
-            snapshots_list = [{"code": None, "name": None, "snapshot": single}]
-    snapshots_list = snapshots_list or []
+    sources_for_map = request_data.get("sources") or []
+    grid_data = request_data.get("grid") or {}
+    show_axes = bool(request_data.get("map_show_axes", True))
+    show_title = bool(request_data.get("map_show_title", True))
 
-    def _embed_snapshot_page(idx, snapshot_str, sub_name):
-        """Один снимок = одна страница PDF. Внутренняя функция."""
-        if not snapshot_str or not isinstance(snapshot_str, str) or "," not in snapshot_str:
-            return
+    for sub_idx, sub in enumerate(by_subs):
+        sub_meta = sub.get("substance") or {}
+        sub_name = sub_meta.get("name") or sub.get("code") or f"Вещество {sub_idx + 1}"
+        sub_points = sub.get("points", [])
+        sub_pdk = sub.get("pdk") or 0.5
+        if not sub_points:
+            continue
         try:
-            header, b64 = snapshot_str.split(",", 1)
-            png_bytes = base64.b64decode(b64)
-            snap_buf = io.BytesIO(png_bytes)
+            png_buf = _make_transparent_dispersion_map(
+                sub_points,
+                sources=sources_for_map,
+                boundary=boundary,
+                pdk=sub_pdk,
+                substance_name=sub_name,
+                show_axes=show_axes,
+                show_title=show_title,
+                grid_data=grid_data,
+            )
+            if png_buf is None:
+                continue
+
             story.append(PageBreak())
-            section_title = "6. Карта рассеивания на местности"
-            if sub_name:
-                section_title += f" — {sub_name}"
+            section_title = f"6.{sub_idx + 1} Карта рассеивания — {sub_name}"
             story.append(Paragraph(section_title, h1_style))
 
             info_lines = [f"<b>Предприятие:</b> {ent_name}"]
             if enterprise.get("address"):
                 info_lines.append(f"<b>Адрес:</b> {enterprise['address']}")
             info_lines.append(f"<b>Точек контура:</b> {len(boundary)}")
-            if sub_name:
-                info_lines.append(f"<b>Вещество:</b> {sub_name}")
-            story.append(Paragraph(" &nbsp;&nbsp;·&nbsp;&nbsp; ".join(info_lines), body_style))
+            info_lines.append(f"<b>Вещество:</b> {sub_name}")
+            info_lines.append(f"<b>ПДК:</b> {sub_pdk} мг/м³")
+            story.append(Paragraph(" &nbsp;·&nbsp; ".join(info_lines), body_style))
             story.append(Spacer(1, 0.3 * cm))
 
-            # Сохраняем пропорции исходного PNG/JPEG
+            # Размер картинки под выбранный формат страницы
             try:
                 from reportlab.lib.utils import ImageReader
-                ir = ImageReader(io.BytesIO(png_bytes))
+                ir = ImageReader(io.BytesIO(png_buf.getvalue()))
                 src_w, src_h = ir.getSize()
-                ratio = src_h / src_w if src_w else 1.0
+                ratio = src_h / src_w if src_w else 0.75
             except Exception:
                 ratio = 0.75
 
-            # Высота под изображение зависит от выбранного формата страницы.
-            # Берём ~85% страницы за вычетом заголовка.
-            max_h = (page_size[1] - 4 * cm) * 0.85
+            max_h = (page_size[1] - 4 * cm) * 0.80
             disp_w = W
             disp_h = W * ratio
             if disp_h > max_h:
                 disp_h = max_h
                 disp_w = max_h / ratio if ratio else W
 
-            snap_img = RLImage(snap_buf, width=disp_w, height=disp_h)
-            story.append(snap_img)
+            png_buf.seek(0)
+            map_img = RLImage(png_buf, width=disp_w, height=disp_h)
+            story.append(map_img)
         except Exception as e:
-            print(f"[pdf_export] Снимок #{idx} не удалось встроить: {e}")
-
-    for idx, snap_meta in enumerate(snapshots_list):
-        if isinstance(snap_meta, dict):
-            _embed_snapshot_page(idx, snap_meta.get("snapshot"), snap_meta.get("name"))
-        elif isinstance(snap_meta, str):
-            _embed_snapshot_page(idx, snap_meta, None)
+            traceback_text = ""
+            try:
+                import traceback as _tb
+                traceback_text = _tb.format_exc()
+            except Exception:
+                pass
+            print(f"[pdf_export] Карта рассеивания #{sub_idx} ({sub_name}) не построена: {e}\n{traceback_text}")
 
     doc.build(story)
     return buf.getvalue()

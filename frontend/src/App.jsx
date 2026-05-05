@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import html2canvas from "html2canvas";
-import { fetchCities, fetchSubstances, fetchWeather, calculate, fetchTables, exportPdf, exportExcel } from "./api.js";
+import { fetchCities, fetchSubstances, fetchWeather, calculate, fetchTables, exportPdf, exportMapPng, exportExcel } from "./api.js";
 import { translations } from "./i18n.js";
 import SourceForm, { createDefaultSource, migrateSource } from "./components/SourceForm.jsx";
 import MeteoPanel from "./components/MeteoPanel.jsx";
@@ -481,105 +480,10 @@ export default function App() {
     }
   };
 
-  // Ждём, пока в текущем вьюпорте Leaflet докачаются все тайлы.
-  // Без этого html2canvas может снять «полупустую» карту.
-  const waitForLeafletTiles = (mapEl, timeoutMs = 4000) => new Promise((resolve) => {
-    const check = () => {
-      const imgs = mapEl.querySelectorAll(".leaflet-tile, img.leaflet-tile-loaded");
-      if (imgs.length === 0) return false;
-      // Все картинки в DOM должны быть complete и naturalHeight > 0
-      for (const img of imgs) {
-        if (!img.complete || img.naturalHeight === 0) return false;
-      }
-      return true;
-    };
-    if (check()) return resolve();
-    const start = Date.now();
-    const id = setInterval(() => {
-      if (check() || Date.now() - start > timeoutMs) {
-        clearInterval(id);
-        resolve();
-      }
-    }, 150);
-  });
-
-  // Снимок текущего вида Leaflet → base64 PNG
-  // Возвращает строку "data:image/png;base64,..." или null при ошибке.
-  const captureMapSnapshot = async () => {
-    const mapEl = document.querySelector(".leaflet-container");
-    if (!mapEl) return null;
-    try {
-      // 1) Дождаться, пока все спутниковые тайлы в текущем вью загрузятся
-      await waitForLeafletTiles(mapEl);
-      // 2) Дать Leaflet и canvas-overlay'ам один кадр на финальный repaint
-      await new Promise((r) => requestAnimationFrame(r));
-
-      const canvas = await html2canvas(mapEl, {
-        useCORS: true,
-        allowTaint: false,
-        backgroundColor: "#ffffff",
-        logging: false,
-        // 2× даёт ~190 DPI при типичном экране 96 DPI — этого хватает
-        // для качественной печати, но размер payload в 4 раза меньше,
-        // чем при 3×, и Render free-тариф (512 МБ RAM) не давится.
-        scale: Math.max(2, window.devicePixelRatio || 1),
-        // Не обрезать тень/края контейнера
-        x: 0,
-        y: 0,
-        width: mapEl.clientWidth,
-        height: mapEl.clientHeight,
-        // В PDF не должны попадать кнопки управления, attribution и т.п.
-        // Прячем все Leaflet-контролы и элементы с классом pdf-snapshot-hide.
-        ignoreElements: (el) => {
-          if (!el.classList) return false;
-          return (
-            el.classList.contains("pdf-snapshot-hide") ||
-            el.classList.contains("leaflet-control") ||
-            el.classList.contains("leaflet-control-zoom") ||
-            el.classList.contains("leaflet-control-attribution") ||
-            el.classList.contains("leaflet-control-container")
-          );
-        },
-      });
-      // JPEG quality 0.92 — для фотографического спутника это сжимает
-      // в 5–10 раз без видимой потери. PNG для такого контента
-      // непомерно дорогой по размеру.
-      return canvas.toDataURL("image/jpeg", 0.92);
-    } catch (err) {
-      console.warn("Не удалось захватить карту:", err);
-      return null;
-    }
-  };
-
-  // Захватывает снимок карты для каждого вещества из result.by_substance.
-  // Между захватами переключает displaySubstanceCode и ждёт перерисовки
-  // canvas-overlay'ов. Если многовеществности нет — возвращает один снимок.
-  const captureAllSubstanceSnapshots = async () => {
-    if (!result?.by_substance || result.by_substance.length <= 1) {
-      const single = await captureMapSnapshot();
-      const sub = result?.by_substance?.[0];
-      return single ? [{
-        code: sub?.code || null,
-        name: sub?.name || result?._substance?.name || null,
-        snapshot: single,
-      }] : [];
-    }
-    const snapshots = [];
-    const originalCode = displaySubstanceCode;
-    for (const sub of result.by_substance) {
-      setDisplaySubstanceCode(sub.code);
-      // React перерендерит, потом дадим Leaflet/canvas-оверлеям перерисоваться:
-      // 350 мс хватает для смены heatmap canvas + перерисовки изолиний.
-      await new Promise((r) => setTimeout(r, 350));
-      await new Promise((r) => requestAnimationFrame(r));
-      const snap = await captureMapSnapshot();
-      if (snap) {
-        snapshots.push({ code: sub.code, name: sub.name, snapshot: snap });
-      }
-    }
-    setDisplaySubstanceCode(originalCode);
-    return snapshots;
-  };
+  // Опциональный флаг: рисовать ли оси и заголовок на карте в PDF.
+  // По умолчанию — да. Можно выключить (тогда карта получится "чистой"
+  // для наложения в CorelDraw).
+  const [pdfShowAxes, setPdfShowAxes] = useState(true);
 
   // Экспорт PDF
   const handleExportPdf = async () => {
@@ -590,17 +494,14 @@ export default function App() {
     setExporting(true);
     try {
       const pdk = Math.min(...sources.map(s => s.pdk ?? 0.5));
-      const snapshots = await captureAllSubstanceSnapshots();
       // Передаём уже готовые результаты — бэкенд пропустит пересчёт.
-      // На Render free (0.1 CPU) это снижает время экспорта в 2 раза.
       await exportPdf({
         sources, meteo, grid, pdk,
         substance: sources[0]?.substance || selectedSubstance,
         enterprise,
-        // Старое поле — для совместимости. Если есть массив — это новая форма.
-        map_snapshot: snapshots[0]?.snapshot || null,
-        map_snapshots: snapshots,
         precomputed_result: result,
+        map_show_axes: pdfShowAxes,
+        map_show_title: pdfShowAxes, // заголовок и оси переключаем вместе
       });
     } catch (e) {
       const detail = e?.response?.data?.detail || e?.message || "неизвестная ошибка";
@@ -608,6 +509,32 @@ export default function App() {
       setError(`Ошибка генерации PDF: ${detail}`);
     } finally {
       setExporting(false);
+    }
+  };
+
+  // Экспорт PNG карт рассеивания (для CorelDraw)
+  const [exportingPng, setExportingPng] = useState(false);
+  const handleExportMapPng = async () => {
+    if (!result) {
+      setError("Сначала нажмите «Рассчитать», потом «Скачать PNG карт».");
+      return;
+    }
+    setExportingPng(true);
+    setError(null);
+    try {
+      const pdk = Math.min(...sources.map(s => s.pdk ?? 0.5));
+      await exportMapPng({
+        sources, meteo, grid, pdk,
+        substance: sources[0]?.substance || selectedSubstance,
+        enterprise,
+        precomputed_result: result,
+      });
+    } catch (e) {
+      const detail = e?.message || "неизвестная ошибка";
+      console.error("Map PNG export failed:", e);
+      setError(`Ошибка скачивания PNG: ${detail}`);
+    } finally {
+      setExportingPng(false);
     }
   };
 
@@ -1018,8 +945,12 @@ export default function App() {
             currentPdk={displayedResult?.pdk ?? 0.5}
             onExportPdf={handleExportPdf}
             exporting={exporting}
+            onExportMapPng={handleExportMapPng}
+            exportingPng={exportingPng}
             onExportExcel={handleExportExcel}
             exportingExcel={exportingExcel}
+            pdfShowAxes={pdfShowAxes}
+            onTogglePdfShowAxes={setPdfShowAxes}
             t={t}
           />
 

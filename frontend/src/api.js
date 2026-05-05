@@ -96,6 +96,38 @@ export async function exportPdf(payload) {
   }
 }
 
+// Скачивает ZIP с прозрачными PNG-картами рассеивания (одна на каждое вещество).
+// Используется для наложения в CorelDraw на свою подложку.
+export async function exportMapPng(payload) {
+  try {
+    const res = await axios.post(`${BASE}/export/map-png`, payload, {
+      responseType: "blob",
+    });
+    const url = window.URL.createObjectURL(new Blob([res.data], { type: "application/zip" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "karty-rasseivaniya.zip";
+    a.click();
+    window.URL.revokeObjectURL(url);
+  } catch (err) {
+    let bodyText = "";
+    if (err.response?.data instanceof Blob) {
+      try { bodyText = await err.response.data.text(); } catch { /* ignore */ }
+    }
+    if (!bodyText || bodyText.trim().length === 0) {
+      throw new Error(err.response?.status
+        ? `сервер вернул ${err.response.status} с пустым ответом`
+        : "нет ответа от сервера");
+    }
+    let detail = bodyText;
+    try {
+      const json = JSON.parse(bodyText);
+      detail = json.detail || bodyText;
+    } catch { /* not json */ }
+    throw new Error(detail);
+  }
+}
+
 export async function exportExcel(payload) {
   const res = await axios.post(`${BASE}/export/excel`, payload, {
     responseType: "blob",

@@ -5,7 +5,14 @@ function fmt(val, digits = 4) {
   return isNaN(n) ? "—" : n.toFixed(digits);
 }
 
-export default function ResultsPanel({ result, currentPdk, onExportPdf, exporting, onExportExcel, exportingExcel, t }) {
+export default function ResultsPanel({
+  result, currentPdk,
+  onExportPdf, exporting,
+  onExportMapPng, exportingPng,
+  onExportExcel, exportingExcel,
+  pdfShowAxes, onTogglePdfShowAxes,
+  t,
+}) {
   if (!result) {
     return (
       <div className="panel-section results-empty">
@@ -95,7 +102,25 @@ export default function ResultsPanel({ result, currentPdk, onExportPdf, exportin
         </div>
       )}
 
-      <div style={{ display: "flex", gap: 6, marginTop: 14 }}>
+      {/* Чекбокс — рисовать ли оси и заголовок на картах в PDF */}
+      {onTogglePdfShowAxes && (
+        <label style={{
+          display: "flex", alignItems: "center", gap: 6,
+          marginTop: 12, fontSize: 11, color: "#475569", cursor: "pointer",
+        }}>
+          <input
+            type="checkbox"
+            checked={!!pdfShowAxes}
+            onChange={(e) => onTogglePdfShowAxes(e.target.checked)}
+          />
+          С координатной сеткой и заголовком
+          <span style={{ color: "#94a3b8" }}>
+            (для CorelDraw — выключить)
+          </span>
+        </label>
+      )}
+
+      <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
         <button
           className="btn-primary"
           style={{ flex: 1 }}
@@ -113,6 +138,21 @@ export default function ResultsPanel({ result, currentPdk, onExportPdf, exportin
           {exportingExcel ? "Экспорт..." : "Excel"}
         </button>
       </div>
+
+      {onExportMapPng && (
+        <button
+          className="btn-secondary"
+          style={{
+            width: "100%", marginTop: 6, fontSize: 12,
+            background: "#FEF3C7", borderColor: "#FDE68A", color: "#92400E",
+          }}
+          onClick={onExportMapPng}
+          disabled={exportingPng}
+          title="Прозрачный PNG карт рассеивания (по одному на вещество) — для наложения в CorelDraw"
+        >
+          {exportingPng ? "Готовим PNG..." : "🎨 Скачать карты PNG (для CorelDraw)"}
+        </button>
+      )}
     </div>
   );
 }
