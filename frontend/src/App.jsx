@@ -603,7 +603,9 @@ export default function App() {
         precomputed_result: result,
       });
     } catch (e) {
-      setError("Ошибка генерации PDF.");
+      const detail = e?.response?.data?.detail || e?.message || "неизвестная ошибка";
+      console.error("PDF export failed:", e);
+      setError(`Ошибка генерации PDF: ${detail}`);
     } finally {
       setExporting(false);
     }

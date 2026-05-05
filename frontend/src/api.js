@@ -48,15 +48,37 @@ export async function calculate(payload) {
 }
 
 export async function exportPdf(payload) {
-  const res = await axios.post(`${BASE}/export/pdf`, payload, {
-    responseType: "blob",
-  });
-  const url = window.URL.createObjectURL(new Blob([res.data], { type: "application/pdf" }));
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "ond86_report.pdf";
-  a.click();
-  window.URL.revokeObjectURL(url);
+  try {
+    const res = await axios.post(`${BASE}/export/pdf`, payload, {
+      responseType: "blob",
+    });
+    const url = window.URL.createObjectURL(new Blob([res.data], { type: "application/pdf" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "ond86_report.pdf";
+    a.click();
+    window.URL.revokeObjectURL(url);
+  } catch (err) {
+    // При ошибке axios возвращает тело как Blob (потому что мы запросили blob).
+    // Достаём настоящий текст ошибки, чтобы пользователь увидел причину,
+    // а не голую "Ошибка генерации PDF".
+    if (err.response?.data instanceof Blob) {
+      const text = await err.response.data.text();
+      try {
+        const json = JSON.parse(text);
+        const detail = json.detail || text;
+        const wrapped = new Error(detail);
+        wrapped.response = { status: err.response.status, data: json };
+        throw wrapped;
+      } catch (parseErr) {
+        if (parseErr instanceof Error && parseErr.message && parseErr !== err) {
+          throw parseErr;
+        }
+        throw new Error(text || err.message);
+      }
+    }
+    throw err;
+  }
 }
 
 export async function exportExcel(payload) {
