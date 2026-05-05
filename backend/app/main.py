@@ -486,6 +486,19 @@ def get_tables(req: CalculationRequest):
 
 @app.post("/api/export/pdf")
 def export_pdf(req: CalculationRequest):
+    import traceback
+    try:
+        return _export_pdf_inner(req)
+    except Exception as e:
+        # Печатаем traceback в stdout — увидим в Render Logs
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Ошибка генерации PDF: {type(e).__name__}: {str(e)[:500]}"
+        )
+
+
+def _export_pdf_inner(req: CalculationRequest):
     city_data = CITIES.get(req.meteo.city, {"A": 200})
 
     multi = compute_per_substance(

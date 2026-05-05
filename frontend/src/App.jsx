@@ -514,18 +514,22 @@ export default function App() {
       const canvas = await html2canvas(mapEl, {
         useCORS: true,
         allowTaint: false,
-        backgroundColor: null,
+        backgroundColor: "#ffffff",
         logging: false,
-        // Печатное качество: 3× даёт ~290 DPI при типичном экране 96 DPI.
-        // Берём максимум из 3× и реального devicePixelRatio (на ретине бывает 2).
-        scale: Math.max(3, window.devicePixelRatio || 1),
+        // 2× даёт ~190 DPI при типичном экране 96 DPI — этого хватает
+        // для качественной печати, но размер payload в 4 раза меньше,
+        // чем при 3×, и Render free-тариф (512 МБ RAM) не давится.
+        scale: Math.max(2, window.devicePixelRatio || 1),
         // Не обрезать тень/края контейнера
         x: 0,
         y: 0,
         width: mapEl.clientWidth,
         height: mapEl.clientHeight,
       });
-      return canvas.toDataURL("image/png");
+      // JPEG quality 0.92 — для фотографического спутника это сжимает
+      // в 5–10 раз без видимой потери. PNG для такого контента
+      // непомерно дорогой по размеру.
+      return canvas.toDataURL("image/jpeg", 0.92);
     } catch (err) {
       console.warn("Не удалось захватить карту:", err);
       return null;

@@ -627,24 +627,37 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
         ))
         story.append(Spacer(1, 0.2 * cm))
 
-        # Карта рассеивания (декартова сетка)
-        plot_buf = _make_concentration_plot(
-            sub_points, grid_step=grid_step, grid_params=grid_data,
-            sources=sources_for_plot, boundary=boundary_for_plot,
-            title=f"Карта рассеивания: {sub_name}",
-        )
-        img = RLImage(plot_buf, width=W, height=W * min(aspect, 1.2))
-        story.append(img)
+        # Карта рассеивания (декартова сетка) — ошибка в одной секции
+        # не должна убивать весь PDF
+        try:
+            plot_buf = _make_concentration_plot(
+                sub_points, grid_step=grid_step, grid_params=grid_data,
+                sources=sources_for_plot, boundary=boundary_for_plot,
+                title=f"Карта рассеивания: {sub_name}",
+            )
+            img = RLImage(plot_buf, width=W, height=W * min(aspect, 1.2))
+            story.append(img)
+        except Exception as e:
+            story.append(Paragraph(
+                f"<i>Не удалось построить карту рассеивания: {str(e)[:200]}</i>",
+                body_style,
+            ))
 
         # Полярная картограмма
-        polar_buf = _make_polar_plot(
-            sub_points, sources=sources_for_plot, pdk=sub_pdk,
-            title=f"Концентрации по румбам: {sub_name}",
-        )
-        if polar_buf is not None:
-            story.append(Spacer(1, 0.3 * cm))
-            polar_img = RLImage(polar_buf, width=W, height=W)
-            story.append(polar_img)
+        try:
+            polar_buf = _make_polar_plot(
+                sub_points, sources=sources_for_plot, pdk=sub_pdk,
+                title=f"Концентрации по румбам: {sub_name}",
+            )
+            if polar_buf is not None:
+                story.append(Spacer(1, 0.3 * cm))
+                polar_img = RLImage(polar_buf, width=W, height=W)
+                story.append(polar_img)
+        except Exception as e:
+            story.append(Paragraph(
+                f"<i>Не удалось построить полярную картограмму: {str(e)[:200]}</i>",
+                body_style,
+            ))
             story.append(Paragraph(
                 "Каждая ячейка — максимум приземной концентрации в соответствующем "
                 "румбе и кольце расстояний от центра промплощадки. "
