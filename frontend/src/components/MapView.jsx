@@ -291,13 +291,21 @@ function IsolineOverlay({ points, maxC, pdk }) {
       Array.from({ length: cols }, (_, c) => cMap[`${lats[r]},${lons[c]}`] || 0)
     );
 
-    // Уровни изолиний
+    // Уровни изолиний (в долях ПДК) по ТЗ.
+    // Изолиния 1.0 ПДК выделена жирной красной — это граница превышения.
     const levels = [
-      { value: pdk * 0.5, color: "#3B82F6", label: "0.5 ПДК", width: 1.5 },
-      { value: pdk,       color: "#EAB308", label: "1.0 ПДК", width: 2.5 },
-      { value: pdk * 2,   color: "#F97316", label: "2.0 ПДК", width: 2 },
-      { value: pdk * 5,   color: "#DC2626", label: "5.0 ПДК", width: 2 },
-    ].filter(l => l.value <= maxC * 1.1);
+      { value: pdk * 0.01, color: "#1F2937", label: "0,01 ПДК", width: 0.6 },
+      { value: pdk * 0.05, color: "#475569", label: "0,05 ПДК", width: 0.7 },
+      { value: pdk * 0.1,  color: "#64748B", label: "0,1 ПДК",  width: 0.8 },
+      { value: pdk * 0.2,  color: "#3B82F6", label: "0,2 ПДК",  width: 0.9 },
+      { value: pdk * 0.3,  color: "#06B6D4", label: "0,3 ПДК",  width: 1.0 },
+      { value: pdk * 0.5,  color: "#EAB308", label: "0,5 ПДК",  width: 1.1 },
+      { value: pdk * 0.6,  color: "#F59E0B", label: "0,6 ПДК",  width: 1.2 },
+      { value: pdk * 0.8,  color: "#F97316", label: "0,8 ПДК",  width: 1.3 },
+      { value: pdk,        color: "#DC2626", label: "1,0 ПДК",  width: 2.4 },
+      { value: pdk * 2,    color: "#991B1B", label: "2,0 ПДК",  width: 1.8 },
+      { value: pdk * 5,    color: "#7F1D1D", label: "5,0 ПДК",  width: 1.8 },
+    ].filter(l => l.value <= maxC * 1.1 && l.value > 0);
 
     const container = map.getContainer();
     const canvas = document.createElement("canvas");
@@ -364,15 +372,21 @@ function IsolineOverlay({ points, maxC, pdk }) {
           ctx.stroke();
         }
 
-        // Подпись на середине первого сегмента
-        const mid = segs[Math.floor(segs.length / 2)];
-        const pm = map.latLngToContainerPoint(mid[0]);
-        ctx.font = "bold 11px sans-serif";
-        ctx.lineWidth = 3;
-        ctx.strokeStyle = "white";
-        ctx.strokeText(lv.label, pm.x + 4, pm.y - 4);
-        ctx.fillStyle = lv.color;
-        ctx.fillText(lv.label, pm.x + 4, pm.y - 4);
+        // Подписи в нескольких местах вдоль изолинии: чем больше сегментов,
+        // тем больше подписей. Минимум одна, максимум четыре.
+        const labelCount = Math.max(1, Math.min(4, Math.floor(segs.length / 12)));
+        const labelStep = Math.max(1, Math.floor(segs.length / (labelCount + 1)));
+        ctx.font = lv.label === "1,0 ПДК" ? "bold 12px sans-serif" : "bold 10px sans-serif";
+        for (let i = 1; i <= labelCount; i++) {
+          const segIdx = Math.min(segs.length - 1, i * labelStep);
+          const seg = segs[segIdx];
+          const pm = map.latLngToContainerPoint(seg[0]);
+          ctx.lineWidth = 3;
+          ctx.strokeStyle = "white";
+          ctx.strokeText(lv.label, pm.x + 4, pm.y - 4);
+          ctx.fillStyle = lv.color;
+          ctx.fillText(lv.label, pm.x + 4, pm.y - 4);
+        }
       }
 
       // Легенда
@@ -496,9 +510,14 @@ function WindRose({ windDirection, windSpeed }) {
 function MapTitle({ enterprise, substance, gridXLength, gridYLength }) {
   const name = enterprise?.name || "";
   const subName = substance?.name || "";
-  const scale = gridXLength ? `Область: ${gridXLength} x ${gridYLength} м` : "";
+  const scale = gridXLength ? `Область: ${gridXLength} × ${gridYLength} м` : "";
 
   if (!name && !subName) return null;
+
+  // По ТЗ: «Карта приземных концентраций <вещество>, доли ПДК»
+  const title = subName
+    ? `Карта приземных концентраций ${subName.toLowerCase()}, доли ПДК`
+    : "Карта приземных концентраций";
 
   return (
     <div style={{
@@ -506,21 +525,14 @@ function MapTitle({ enterprise, substance, gridXLength, gridYLength }) {
       zIndex: 999, background: "rgba(255,255,255,0.93)",
       borderRadius: 8, padding: "6px 16px",
       boxShadow: "0 2px 6px rgba(0,0,0,0.2)",
-      textAlign: "center", maxWidth: "60%",
+      textAlign: "center", maxWidth: "70%",
     }}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
+        {title}
+      </div>
       {name && (
-        <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
-          Уровень загрязнения атмосферы выбросами
-        </div>
-      )}
-      {name && (
-        <div style={{ fontSize: 12, fontWeight: 600, color: "#1E293B" }}>
+        <div style={{ fontSize: 11, color: "#475569", marginTop: 2 }}>
           {name}
-        </div>
-      )}
-      {subName && (
-        <div style={{ fontSize: 11, color: "#64748b" }}>
-          Вещество: {subName}
         </div>
       )}
       {scale && (
@@ -802,7 +814,7 @@ export default function MapView({
       )}
 
       {/* Заголовок */}
-      {result && viewMode === "grid" && (
+      {result && (viewMode === "grid" || viewMode === "isolines") && (
         <MapTitle enterprise={enterprise} substance={substance} gridXLength={gridXLength} gridYLength={gridYLength} />
       )}
 

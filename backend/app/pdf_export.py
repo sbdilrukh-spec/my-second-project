@@ -15,7 +15,7 @@ import numpy as np
 
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
-from reportlab.lib.pagesizes import A4
+from reportlab.lib.pagesizes import A3, A4, landscape, portrait
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.pdfbase import pdfmetrics
@@ -446,9 +446,21 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
     """
     title_style, h1_style, body_style = _styles()
     buf = io.BytesIO()
+
+    # Адаптивный формат страницы по соотношению сторон расчётной сетки.
+    # По ТЗ: W/H >= 1.15 → альбомный A3, H/W >= 1.15 → книжный A4, иначе → A4 portrait.
+    grid_data = request_data.get("grid") or {}
+    gx = grid_data.get("x_length") or 7000
+    gy = grid_data.get("y_length") or 7000
+    if gx > 0 and gy > 0 and gx / gy >= 1.15:
+        page_size = landscape(A3)
+    else:
+        # Книжный A4 — и для квадратной сетки, и для вытянутой по Y
+        page_size = portrait(A4)
+
     doc = SimpleDocTemplate(
         buf,
-        pagesize=A4,
+        pagesize=page_size,
         leftMargin=2 * cm,
         rightMargin=2 * cm,
         topMargin=2 * cm,
@@ -456,7 +468,7 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
     )
 
     story = []
-    W = A4[0] - 4 * cm   # ширина контента
+    W = page_size[0] - 4 * cm   # ширина контента
 
     # --- Заголовок ---
     story.append(Paragraph(
