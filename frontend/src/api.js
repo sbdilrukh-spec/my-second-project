@@ -60,24 +60,39 @@ export async function exportPdf(payload) {
     window.URL.revokeObjectURL(url);
   } catch (err) {
     // При ошибке axios возвращает тело как Blob (потому что мы запросили blob).
-    // Достаём настоящий текст ошибки, чтобы пользователь увидел причину,
-    // а не голую "Ошибка генерации PDF".
+    // Достаём настоящий текст ошибки, чтобы пользователь увидел причину.
+    const status = err.response?.status;
+    let bodyText = "";
     if (err.response?.data instanceof Blob) {
-      const text = await err.response.data.text();
       try {
-        const json = JSON.parse(text);
-        const detail = json.detail || text;
-        const wrapped = new Error(detail);
-        wrapped.response = { status: err.response.status, data: json };
-        throw wrapped;
-      } catch (parseErr) {
-        if (parseErr instanceof Error && parseErr.message && parseErr !== err) {
-          throw parseErr;
-        }
-        throw new Error(text || err.message);
-      }
+        bodyText = await err.response.data.text();
+      } catch { /* ignore */ }
     }
-    throw err;
+
+    // Пустое тело = backend упал без ответа (OOM, kill, обрыв сети).
+    if (!bodyText || bodyText.trim().length === 0) {
+      const w = new Error(
+        status
+          ? `сервер вернул ${status} с пустым ответом (возможно, не хватило памяти на Render free-tier — попробуйте ещё раз через минуту)`
+          : "нет ответа от сервера (потеря соединения или таймаут)"
+      );
+      w.response = { status, data: null };
+      throw w;
+    }
+
+    // Пробуем разобрать как JSON и вытащить detail.
+    let detail = bodyText;
+    let parsedJson = null;
+    try {
+      parsedJson = JSON.parse(bodyText);
+      detail = parsedJson.detail || bodyText;
+    } catch {
+      // Не JSON — возвращаем сырой текст (обрезаем длинные HTML-страницы).
+      if (detail.length > 400) detail = detail.slice(0, 400) + "…";
+    }
+    const wrapped = new Error(detail);
+    wrapped.response = { status, data: parsedJson };
+    throw wrapped;
   }
 }
 
