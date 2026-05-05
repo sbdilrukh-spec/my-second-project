@@ -122,6 +122,9 @@ class CalculationRequest(BaseModel):
     enterprise: Optional[EnterpriseInput] = None
     # Снимок карты Leaflet (data URL "data:image/png;base64,...") — только для /export/pdf
     map_snapshot: Optional[str] = None
+    # Готовый результат расчёта с фронта — позволяет пропустить пересчёт в /export/pdf
+    # и /export/excel. Структура совпадает с тем, что вернул /api/calculate.
+    precomputed_result: Optional[dict] = None
 
 
 class GridPoint(BaseModel):

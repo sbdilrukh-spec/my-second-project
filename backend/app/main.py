@@ -499,48 +499,52 @@ def export_pdf(req: CalculationRequest):
 
 
 def _export_pdf_inner(req: CalculationRequest):
-    city_data = CITIES.get(req.meteo.city, {"A": 200})
-
-    multi = compute_per_substance(
-        sources=req.sources,
-        meteo=req.meteo,
-        city_data=city_data,
-        **_grid_kwargs(req.grid),
-    )
-
-    primary_code = multi["primary_code"]
-    primary = multi["by_substance"][primary_code]
-    pdk = primary["pdk"]
-
     request_dict = req.model_dump()
-    # map_snapshot уже в request_dict, generate_pdf его прочитает.
-    # Для PDF передаём данные по главному веществу как «верхний уровень» +
-    # массив всех веществ для секций "по веществам".
-    result_dict = {
-        "points": primary["points"],
-        "max_c": primary["max_c"],
-        "max_lat": primary["max_lat"],
-        "max_lon": primary["max_lon"],
-        "source_results": primary["source_results"],
-        "exceeds_pdk": primary["exceeds_pdk"],
-        "pdk": pdk,
-        "by_substance": [
-            {
-                "code": code if code != "unknown" else None,
-                "substance": data.get("substance"),
-                "pdk": data["pdk"],
-                "max_c": data["max_c"],
-                "max_lat": data["max_lat"],
-                "max_lon": data["max_lon"],
-                "exceeds_pdk": data["exceeds_pdk"],
-                "ratio_to_pdk": data["ratio_to_pdk"],
-                "points": data["points"],
-                "source_results": data["source_results"],
-            }
-            for code, data in multi["by_substance"].items()
-        ],
-        "primary_code": primary_code if primary_code != "unknown" else None,
-    }
+
+    # Если фронт прислал готовый результат /api/calculate — используем его.
+    # Это пропускает дорогой compute_per_substance и снижает время экспорта
+    # в 2 раза на Render free-тарифе.
+    if req.precomputed_result and isinstance(req.precomputed_result, dict):
+        result_dict = dict(req.precomputed_result)
+        # Гарантируем минимально необходимые ключи для generate_pdf
+        result_dict.setdefault("points", [])
+        result_dict.setdefault("by_substance", [])
+        result_dict.setdefault("pdk", req.pdk or 0.5)
+    else:
+        city_data = CITIES.get(req.meteo.city, {"A": 200})
+        multi = compute_per_substance(
+            sources=req.sources,
+            meteo=req.meteo,
+            city_data=city_data,
+            **_grid_kwargs(req.grid),
+        )
+        primary_code = multi["primary_code"]
+        primary = multi["by_substance"][primary_code]
+        result_dict = {
+            "points": primary["points"],
+            "max_c": primary["max_c"],
+            "max_lat": primary["max_lat"],
+            "max_lon": primary["max_lon"],
+            "source_results": primary["source_results"],
+            "exceeds_pdk": primary["exceeds_pdk"],
+            "pdk": primary["pdk"],
+            "by_substance": [
+                {
+                    "code": code if code != "unknown" else None,
+                    "substance": data.get("substance"),
+                    "pdk": data["pdk"],
+                    "max_c": data["max_c"],
+                    "max_lat": data["max_lat"],
+                    "max_lon": data["max_lon"],
+                    "exceeds_pdk": data["exceeds_pdk"],
+                    "ratio_to_pdk": data["ratio_to_pdk"],
+                    "points": data["points"],
+                    "source_results": data["source_results"],
+                }
+                for code, data in multi["by_substance"].items()
+            ],
+            "primary_code": primary_code if primary_code != "unknown" else None,
+        }
 
     pdf_bytes = generate_pdf(request_dict, result_dict)
 

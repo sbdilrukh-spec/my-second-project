@@ -538,15 +538,22 @@ export default function App() {
 
   // Экспорт PDF
   const handleExportPdf = async () => {
+    if (!result) {
+      setError("Сначала нажмите «Рассчитать», потом «Экспорт PDF».");
+      return;
+    }
     setExporting(true);
     try {
       const pdk = Math.min(...sources.map(s => s.pdk ?? 0.5));
       const mapSnapshot = await captureMapSnapshot();
+      // Передаём уже готовые результаты — бэкенд пропустит пересчёт.
+      // На Render free (0.1 CPU) это снижает время экспорта в 2 раза.
       await exportPdf({
         sources, meteo, grid, pdk,
         substance: sources[0]?.substance || selectedSubstance,
         enterprise,
         map_snapshot: mapSnapshot,
+        precomputed_result: result,
       });
     } catch (e) {
       setError("Ошибка генерации PDF.");
