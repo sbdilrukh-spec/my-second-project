@@ -478,19 +478,52 @@ export default function App() {
     }
   };
 
+  // Ждём, пока в текущем вьюпорте Leaflet докачаются все тайлы.
+  // Без этого html2canvas может снять «полупустую» карту.
+  const waitForLeafletTiles = (mapEl, timeoutMs = 4000) => new Promise((resolve) => {
+    const check = () => {
+      const imgs = mapEl.querySelectorAll(".leaflet-tile, img.leaflet-tile-loaded");
+      if (imgs.length === 0) return false;
+      // Все картинки в DOM должны быть complete и naturalHeight > 0
+      for (const img of imgs) {
+        if (!img.complete || img.naturalHeight === 0) return false;
+      }
+      return true;
+    };
+    if (check()) return resolve();
+    const start = Date.now();
+    const id = setInterval(() => {
+      if (check() || Date.now() - start > timeoutMs) {
+        clearInterval(id);
+        resolve();
+      }
+    }, 150);
+  });
+
   // Снимок текущего вида Leaflet → base64 PNG
   // Возвращает строку "data:image/png;base64,..." или null при ошибке.
   const captureMapSnapshot = async () => {
     const mapEl = document.querySelector(".leaflet-container");
     if (!mapEl) return null;
     try {
+      // 1) Дождаться, пока все спутниковые тайлы в текущем вью загрузятся
+      await waitForLeafletTiles(mapEl);
+      // 2) Дать Leaflet и canvas-overlay'ам один кадр на финальный repaint
+      await new Promise((r) => requestAnimationFrame(r));
+
       const canvas = await html2canvas(mapEl, {
         useCORS: true,
         allowTaint: false,
         backgroundColor: null,
         logging: false,
-        // Высокое DPI для качественной печати в PDF
-        scale: Math.min(2, window.devicePixelRatio || 1),
+        // Печатное качество: 3× даёт ~290 DPI при типичном экране 96 DPI.
+        // Берём максимум из 3× и реального devicePixelRatio (на ретине бывает 2).
+        scale: Math.max(3, window.devicePixelRatio || 1),
+        // Не обрезать тень/края контейнера
+        x: 0,
+        y: 0,
+        width: mapEl.clientWidth,
+        height: mapEl.clientHeight,
       });
       return canvas.toDataURL("image/png");
     } catch (err) {
