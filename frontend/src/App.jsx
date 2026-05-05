@@ -343,18 +343,21 @@ export default function App() {
   };
 
   // Принудительный перенос всех источников в центроид контура —
-  // используется кнопкой "Переместить все источники в контур".
-  // В отличие от авто-снапа, двигает источники независимо от того,
-  // где они стоят сейчас.
-  const handleSnapSourcesToBoundary = () => {
+  // используется кнопкой "Переместить все источники в контур" и
+  // авто-снапом после подтверждения импорта.
+  const handleSnapSourcesToBoundary = (opts = {}) => {
     const b = enterprise.boundary;
     if (!b || b.length === 0) {
-      setError("Сначала задайте контур предприятия в модуле «🏭 Координаты предприятия».");
+      if (!opts.silent) {
+        setError("Сначала задайте контур предприятия в модуле «🏭 Координаты предприятия».");
+      }
       return;
     }
     const cLat = b.reduce((s, p) => s + (p.lat || 0), 0) / b.length;
     const cLon = b.reduce((s, p) => s + (p.lon || 0), 0) / b.length;
-    if (!window.confirm(`Переместить все ${sources.length} источников в центр контура?`)) return;
+    if (!opts.silent) {
+      if (!window.confirm(`Переместить все ${sources.length} источников в центр контура?`)) return;
+    }
     setSources((prev) => prev.map((src) => ({ ...src, lat: cLat, lon: cLon })));
   };
 
@@ -548,6 +551,36 @@ export default function App() {
     }
   };
 
+  // Захватывает снимок карты для каждого вещества из result.by_substance.
+  // Между захватами переключает displaySubstanceCode и ждёт перерисовки
+  // canvas-overlay'ов. Если многовеществности нет — возвращает один снимок.
+  const captureAllSubstanceSnapshots = async () => {
+    if (!result?.by_substance || result.by_substance.length <= 1) {
+      const single = await captureMapSnapshot();
+      const sub = result?.by_substance?.[0];
+      return single ? [{
+        code: sub?.code || null,
+        name: sub?.name || result?._substance?.name || null,
+        snapshot: single,
+      }] : [];
+    }
+    const snapshots = [];
+    const originalCode = displaySubstanceCode;
+    for (const sub of result.by_substance) {
+      setDisplaySubstanceCode(sub.code);
+      // React перерендерит, потом дадим Leaflet/canvas-оверлеям перерисоваться:
+      // 350 мс хватает для смены heatmap canvas + перерисовки изолиний.
+      await new Promise((r) => setTimeout(r, 350));
+      await new Promise((r) => requestAnimationFrame(r));
+      const snap = await captureMapSnapshot();
+      if (snap) {
+        snapshots.push({ code: sub.code, name: sub.name, snapshot: snap });
+      }
+    }
+    setDisplaySubstanceCode(originalCode);
+    return snapshots;
+  };
+
   // Экспорт PDF
   const handleExportPdf = async () => {
     if (!result) {
@@ -557,14 +590,16 @@ export default function App() {
     setExporting(true);
     try {
       const pdk = Math.min(...sources.map(s => s.pdk ?? 0.5));
-      const mapSnapshot = await captureMapSnapshot();
+      const snapshots = await captureAllSubstanceSnapshots();
       // Передаём уже готовые результаты — бэкенд пропустит пересчёт.
       // На Render free (0.1 CPU) это снижает время экспорта в 2 раза.
       await exportPdf({
         sources, meteo, grid, pdk,
         substance: sources[0]?.substance || selectedSubstance,
         enterprise,
-        map_snapshot: mapSnapshot,
+        // Старое поле — для совместимости. Если есть массив — это новая форма.
+        map_snapshot: snapshots[0]?.snapshot || null,
+        map_snapshots: snapshots,
         precomputed_result: result,
       });
     } catch (e) {
@@ -1062,6 +1097,19 @@ export default function App() {
             requestFitToBoundary();
             setShowBoundaryEditor(false);
             setPickingEnterprise(false);
+          }}
+          onAfterImport={(importedCount) => {
+            // После подтверждения импорта спрашиваем — переместить ли все
+            // источники в центр контура. Это закрывает кейс, когда источники
+            // заранее были раскиданы где-то в стороне, а контур теперь здесь.
+            if (sources.length === 0) return;
+            if (sources.length === 1 || window.confirm(
+              `Импортировано ${importedCount} точек контура.\n\n` +
+              `Переместить все ${sources.length} источников в центр контура? ` +
+              `Это нужно, если источники сейчас не на промплощадке.`
+            )) {
+              handleSnapSourcesToBoundary({ silent: true });
+            }
           }}
           onClose={() => {
             setShowBoundaryEditor(false);

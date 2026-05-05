@@ -622,30 +622,46 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
         story.append(sub_tbl)
         story.append(Spacer(1, 0.4 * cm))
 
-    # --- 6. Карта рассеивания (снимок интерактивной карты со спутника) ---
-    snapshot = request_data.get("map_snapshot")
-    if snapshot and isinstance(snapshot, str) and "," in snapshot:
+    # --- 6. Карты рассеивания на местности (по одной странице на вещество) ---
+    from reportlab.platypus import PageBreak
+
+    enterprise = request_data.get("enterprise") or {}
+    boundary = (enterprise.get("boundary") or [])
+    ent_name = enterprise.get("name") or "—"
+
+    # Новая форма: массив map_snapshots = [{code, name, snapshot}, ...]
+    # Старая (одиночный map_snapshot) тоже поддерживается — превращаем в массив из 1.
+    snapshots_list = request_data.get("map_snapshots")
+    if not snapshots_list:
+        single = request_data.get("map_snapshot")
+        if single:
+            snapshots_list = [{"code": None, "name": None, "snapshot": single}]
+    snapshots_list = snapshots_list or []
+
+    def _embed_snapshot_page(idx, snapshot_str, sub_name):
+        """Один снимок = одна страница PDF. Внутренняя функция."""
+        if not snapshot_str or not isinstance(snapshot_str, str) or "," not in snapshot_str:
+            return
         try:
-            # Отрезаем префикс "data:image/png;base64,"
-            header, b64 = snapshot.split(",", 1)
+            header, b64 = snapshot_str.split(",", 1)
             png_bytes = base64.b64decode(b64)
             snap_buf = io.BytesIO(png_bytes)
-            # Отдельная страница, чтобы снимок не сжимался под остатки места
-            from reportlab.platypus import PageBreak
             story.append(PageBreak())
-            story.append(Paragraph("6. Карта рассеивания на местности", h1_style))
+            section_title = "6. Карта рассеивания на местности"
+            if sub_name:
+                section_title += f" — {sub_name}"
+            story.append(Paragraph(section_title, h1_style))
 
-            enterprise = request_data.get("enterprise") or {}
-            boundary = (enterprise.get("boundary") or [])
-            ent_name = enterprise.get("name") or "—"
             info_lines = [f"<b>Предприятие:</b> {ent_name}"]
             if enterprise.get("address"):
                 info_lines.append(f"<b>Адрес:</b> {enterprise['address']}")
             info_lines.append(f"<b>Точек контура:</b> {len(boundary)}")
+            if sub_name:
+                info_lines.append(f"<b>Вещество:</b> {sub_name}")
             story.append(Paragraph(" &nbsp;&nbsp;·&nbsp;&nbsp; ".join(info_lines), body_style))
             story.append(Spacer(1, 0.3 * cm))
 
-            # Получаем размеры PNG, чтобы сохранить пропорции
+            # Сохраняем пропорции исходного PNG/JPEG
             try:
                 from reportlab.lib.utils import ImageReader
                 ir = ImageReader(io.BytesIO(png_bytes))
@@ -654,8 +670,9 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
             except Exception:
                 ratio = 0.75
 
-            # Доступная высота на странице A4 после заголовка ~ 22 см
-            max_h = 22 * cm
+            # Высота под изображение зависит от выбранного формата страницы.
+            # Берём ~85% страницы за вычетом заголовка.
+            max_h = (page_size[1] - 4 * cm) * 0.85
             disp_w = W
             disp_h = W * ratio
             if disp_h > max_h:
@@ -664,10 +681,14 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
 
             snap_img = RLImage(snap_buf, width=disp_w, height=disp_h)
             story.append(snap_img)
-
         except Exception as e:
-            # Снимок битый — просто пропускаем секцию, не валим весь PDF
-            print(f"[pdf_export] Не удалось встроить снимок карты: {e}")
+            print(f"[pdf_export] Снимок #{idx} не удалось встроить: {e}")
+
+    for idx, snap_meta in enumerate(snapshots_list):
+        if isinstance(snap_meta, dict):
+            _embed_snapshot_page(idx, snap_meta.get("snapshot"), snap_meta.get("name"))
+        elif isinstance(snap_meta, str):
+            _embed_snapshot_page(idx, snap_meta, None)
 
     doc.build(story)
     return buf.getvalue()

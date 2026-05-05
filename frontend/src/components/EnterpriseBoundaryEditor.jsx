@@ -72,7 +72,7 @@ function parseImportText(text) {
 }
 
 export default function EnterpriseBoundaryEditor({
-  boundary, onChange, picking, onTogglePicking, onFitMap, onClose, t,
+  boundary, onChange, picking, onTogglePicking, onFitMap, onAfterImport, onClose, t,
 }) {
   const [importText, setImportText] = useState("");
   const [importError, setImportError] = useState(null);
@@ -115,12 +115,15 @@ export default function EnterpriseBoundaryEditor({
   // Шаг 2: подтвердить и записать в boundary
   const handleConfirmImport = () => {
     if (!importPreview?.points?.length) return;
+    const importedCount = importPreview.points.length;
     onChange([...boundary, ...importPreview.points]);
     setImportText("");
     setImportPreview(null);
     setImportError(null);
     setShowImport(false);
-    // После подтверждения импорта — приближаем карту к контуру и закрываем модал
+    // 1. Спрашиваем, нужно ли перенести источники в центр контура
+    if (onAfterImport) onAfterImport(importedCount);
+    // 2. Приближаем карту к контуру и закрываем модал
     if (onFitMap) onFitMap();
   };
 
