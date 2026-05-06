@@ -514,8 +514,12 @@ def _make_transparent_dispersion_map(
     aspect = y_length / x_length if x_length > 0 else 1.0
     fig_w = 12
     fig_h = max(4, fig_w * aspect)
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h), facecolor="none")
-    ax.set_facecolor("none")
+
+    # Фон: белый только для PDF (когда показываем оси), прозрачный для CorelDraw
+    fig_face = "white" if show_axes else "none"
+    ax_face = "white" if show_axes else "none"
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), facecolor=fig_face)
+    ax.set_facecolor(ax_face)
 
     # Заливка между изолиниями (полупрозрачная розово-красная палитра)
     fill_colors = [
@@ -530,38 +534,62 @@ def _make_transparent_dispersion_map(
         alpha=0.45, extend="max",
     )
 
-    # Линии изолиний — поверх заливки, более насыщенные
-    cl = ax.contour(
+    # Все линии изолиний — без подписей (тонкие, для густоты картинки)
+    cl_all = ax.contour(
         XI, YI, Z_pdk, levels=iso_levels,
         colors="#7F1D1D", linewidths=0.9, alpha=0.95,
     )
-    # Подписи на линиях с белой обводкой текста — читаются на любом фоне
-    labels = ax.clabel(cl, inline=True, fontsize=8, fmt=lambda v: f"{v:g} ПДК")
-    for lab in labels or []:
-        lab.set_path_effects([])  # сброс
-    # Перерисовываем подписи белой обводкой через PathEffect
+
+    # Подписываем только «ключевые» уровни — реже, читабельнее
+    KEY_LEVELS = {0.1, 0.2, 0.3, 0.5, 1.0, 2.0, 5.0}
+    label_levels = [lv for lv in iso_levels if any(abs(lv - k) < 1e-6 for k in KEY_LEVELS)]
+    # Если ключевых нет в наборе (поле слишком слабое) — подпишем хотя бы максимальную
+    if not label_levels:
+        label_levels = [iso_levels[-1]]
+
+    try:
+        labels = ax.clabel(
+            cl_all,
+            levels=label_levels,
+            inline=True,
+            fontsize=12,
+            fmt=lambda v: f"{v:g} ПДК",
+            inline_spacing=8,
+        )
+    except TypeError:
+        # Старые matplotlib без аргумента levels — фолбэк
+        labels = ax.clabel(cl_all, inline=True, fontsize=12, fmt=lambda v: f"{v:g} ПДК")
+
+    # Белая обводка текста, чтобы читалось и на цветной заливке
     try:
         import matplotlib.patheffects as pe
         for lab in labels or []:
             lab.set_path_effects([
-                pe.Stroke(linewidth=2.5, foreground="white"),
+                pe.Stroke(linewidth=3, foreground="white"),
                 pe.Normal(),
             ])
     except Exception:
         pass
 
-    # Изолиния 1.0 ПДК — выделена
+    # Изолиния 1,0 ПДК — выделена толстой красной + крупной подписью
     if any(abs(lv - 1.0) < 1e-6 for lv in iso_levels):
         cl_one = ax.contour(
             XI, YI, Z_pdk, levels=[1.0],
-            colors="#DC2626", linewidths=2.4,
+            colors="#DC2626", linewidths=2.6,
         )
         try:
-            ax.clabel(cl_one, inline=True, fontsize=10, fmt=lambda v: "1,0 ПДК")
+            one_labels = ax.clabel(cl_one, inline=True, fontsize=13, fmt=lambda v: "1,0 ПДК")
+            import matplotlib.patheffects as pe2
+            for lab in one_labels or []:
+                lab.set_fontweight("bold")
+                lab.set_path_effects([
+                    pe2.Stroke(linewidth=3.5, foreground="white"),
+                    pe2.Normal(),
+                ])
         except Exception:
             pass
 
-    # Источники — пронумерованные кружки
+    # Источники — пронумерованные кружки (крупнее)
     if sources:
         for i, src in enumerate(sources):
             try:
@@ -569,9 +597,9 @@ def _make_transparent_dispersion_map(
                 sy = (float(src["lat"]) - origin_lat) * 111_000.0
             except (KeyError, TypeError, ValueError):
                 continue
-            ax.plot(sx, sy, "o", color="#7C2D12", markersize=12,
-                    markeredgecolor="white", markeredgewidth=1.5, zorder=10)
-            ax.text(sx, sy, str(i + 1), color="white", fontsize=8,
+            ax.plot(sx, sy, "o", color="#7C2D12", markersize=14,
+                    markeredgecolor="white", markeredgewidth=1.8, zorder=10)
+            ax.text(sx, sy, str(i + 1), color="white", fontsize=10,
                     fontweight="bold", ha="center", va="center", zorder=11)
 
     # Контур площадки — оранжевая линия
@@ -587,17 +615,56 @@ def _make_transparent_dispersion_map(
             bx.append(bx[0])
             by.append(by[0])
         if len(bx) >= 2:
-            ax.plot(bx, by, color="#EA580C", linewidth=1.8,
+            ax.plot(bx, by, color="#EA580C", linewidth=2.0,
                     solid_capstyle="round", zorder=8)
+
+    # ── Линейка масштаба в левом-нижнем углу ────────────────────────────────
+    # Подбираем "круглую" длину, которая ~20% ширины карты
+    scale_candidates = [50, 100, 200, 250, 500, 1000, 2000, 5000, 10000]
+    target_len = x_length * 0.20
+    bar_len = scale_candidates[0]
+    for c in scale_candidates:
+        if c <= target_len:
+            bar_len = c
+    # Положение и размер
+    bar_x0 = x_length * 0.04
+    bar_y0 = y_length * 0.05
+    bar_h = y_length * 0.008
+    # Тёмный прямоугольник + белая каёмка для контраста
+    ax.add_patch(plt.Rectangle(
+        (bar_x0 - bar_len * 0.005, bar_y0 - bar_h * 0.5),
+        bar_len * 1.01, bar_h * 2.0,
+        facecolor="white", edgecolor="black", linewidth=0.8, zorder=12,
+    ))
+    ax.add_patch(plt.Rectangle(
+        (bar_x0, bar_y0), bar_len, bar_h,
+        facecolor="black", edgecolor="black", linewidth=0.5, zorder=13,
+    ))
+    # Половинная отметка — белая полоска внутри
+    ax.add_patch(plt.Rectangle(
+        (bar_x0 + bar_len / 2, bar_y0), bar_len / 2, bar_h,
+        facecolor="white", edgecolor="black", linewidth=0.5, zorder=14,
+    ))
+    # Подписи 0 / середина / конец
+    if bar_len >= 1000:
+        labels_text = [(0, "0"), (bar_len / 2, f"{int(bar_len/2)} м"), (bar_len, f"{int(bar_len)} м")]
+    else:
+        labels_text = [(0, "0"), (bar_len / 2, f"{int(bar_len/2)}"), (bar_len, f"{int(bar_len)} м")]
+    for x_off, txt in labels_text:
+        ax.text(
+            bar_x0 + x_off, bar_y0 + bar_h * 2.5, txt,
+            ha="center", va="bottom", fontsize=11, fontweight="bold",
+            color="black", zorder=15,
+        )
 
     ax.set_xlim(0, x_length)
     ax.set_ylim(0, y_length)
     ax.set_aspect("equal")
 
     if show_axes:
-        ax.set_xlabel("X, м", fontsize=9)
-        ax.set_ylabel("Y, м", fontsize=9)
-        ax.tick_params(labelsize=8)
+        ax.set_xlabel("X, м", fontsize=12)
+        ax.set_ylabel("Y, м", fontsize=12)
+        ax.tick_params(labelsize=11)
         ax.grid(True, alpha=0.3, linestyle="--", color="#888")
     else:
         ax.set_axis_off()
@@ -605,7 +672,7 @@ def _make_transparent_dispersion_map(
     if show_title and substance_name:
         ax.set_title(
             f"Карта приземных концентраций {substance_name}, доли ПДК",
-            fontsize=11, fontweight="bold", pad=8,
+            fontsize=13, fontweight="bold", pad=10,
         )
 
     fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
@@ -614,7 +681,8 @@ def _make_transparent_dispersion_map(
         buf, format="png", dpi=150,
         bbox_inches="tight" if (show_axes or show_title) else None,
         pad_inches=0.05 if (show_axes or show_title) else 0,
-        transparent=True,
+        transparent=not show_axes,  # белый фон только в PDF (show_axes=True)
+        facecolor=fig_face,
     )
     plt.close(fig)
     buf.seek(0)
