@@ -10,7 +10,7 @@ export default function ResultsPanel({
   onExportPdf, exporting,
   onExportMapPng, exportingPng,
   onExportExcel, exportingExcel,
-  pdfShowAxes, onTogglePdfShowAxes,
+  pdfMapType, onChangePdfMapType,
   t,
 }) {
   if (!result) {
@@ -102,22 +102,40 @@ export default function ResultsPanel({
         </div>
       )}
 
-      {/* Чекбокс — рисовать ли оси и заголовок на картах в PDF */}
-      {onTogglePdfShowAxes && (
-        <label style={{
-          display: "flex", alignItems: "center", gap: 6,
-          marginTop: 12, fontSize: 11, color: "#475569", cursor: "pointer",
+      {/* Тип карты в PDF: изолинии или сетка ОНД с числами */}
+      {onChangePdfMapType && (
+        <div style={{
+          marginTop: 12, padding: 8, borderRadius: 6,
+          background: "#F1F5F9", border: "1px solid #E2E8F0",
         }}>
-          <input
-            type="checkbox"
-            checked={!!pdfShowAxes}
-            onChange={(e) => onTogglePdfShowAxes(e.target.checked)}
-          />
-          С координатной сеткой и заголовком
-          <span style={{ color: "#94a3b8" }}>
-            (для CorelDraw — выключить)
-          </span>
-        </label>
+          <div style={{ fontSize: 11, fontWeight: 600, color: "#334155", marginBottom: 6 }}>
+            Тип карты рассеивания в PDF
+          </div>
+          <label style={{
+            display: "flex", alignItems: "center", gap: 6,
+            fontSize: 11, color: "#1F2937", cursor: "pointer", marginBottom: 4,
+          }}>
+            <input
+              type="radio"
+              name="pdf-map-type"
+              checked={pdfMapType !== "grid"}
+              onChange={() => onChangePdfMapType("isolines")}
+            />
+            <span><b>Изолинии в долях ПДК</b> — цветные изолинии с заливкой и подписями</span>
+          </label>
+          <label style={{
+            display: "flex", alignItems: "center", gap: 6,
+            fontSize: 11, color: "#1F2937", cursor: "pointer",
+          }}>
+            <input
+              type="radio"
+              name="pdf-map-type"
+              checked={pdfMapType === "grid"}
+              onChange={() => onChangePdfMapType("grid")}
+            />
+            <span><b>Сетка ОНД</b> — табличная карта с числами концентрации в каждой ячейке</span>
+          </label>
+        </div>
       )}
 
       <div style={{ display: "flex", gap: 6, marginTop: 10 }}>

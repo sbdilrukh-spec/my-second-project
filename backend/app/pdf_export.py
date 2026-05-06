@@ -216,15 +216,9 @@ def _make_concentration_plot(points_data: list, grid_step: float = 500,
                 bx.append(bx[0]); by.append(by[0])
             ax.plot(bx, by, color="#EA580C", linewidth=1.6, zorder=4, solid_capstyle="round")
 
-    # Маркеры источников — пронумерованные кружки
-    src_list = sources or []
-    if not src_list and grid_params:
-        # Совместимость: если sources не передан, используем offset из grid_params
-        sx = grid_params.get("source_offset_x", x_range / 2)
-        sy = grid_params.get("source_offset_y", y_range / 2)
-        src_list = [{"_xy": (sx, sy)}]
-
-    for idx, src in enumerate(src_list):
+    # Маркеры источников отключены — карта рассеивания без них
+    # (при необходимости источники видны в основной карте Leaflet)
+    for idx, src in enumerate([]):
         if "_xy" in src:
             sx, sy = src["_xy"]
         else:
@@ -589,18 +583,9 @@ def _make_transparent_dispersion_map(
         except Exception:
             pass
 
-    # Источники — пронумерованные кружки (крупнее)
-    if sources:
-        for i, src in enumerate(sources):
-            try:
-                sx = (float(src["lon"]) - origin_lon) * 111_000.0 * np.cos(lat_rad)
-                sy = (float(src["lat"]) - origin_lat) * 111_000.0
-            except (KeyError, TypeError, ValueError):
-                continue
-            ax.plot(sx, sy, "o", color="#7C2D12", markersize=14,
-                    markeredgecolor="white", markeredgewidth=1.8, zorder=10)
-            ax.text(sx, sy, str(i + 1), color="white", fontsize=10,
-                    fontweight="bold", ha="center", va="center", zorder=11)
+    # Источники в карте рассеивания не отображаем — пользователь
+    # просил убрать пронумерованные кружки. Контур площадки остаётся.
+    _ = sources  # параметр оставляем в сигнатуре для совместимости
 
     # Контур площадки — оранжевая линия
     if boundary and len(boundary) >= 2:
@@ -618,54 +603,71 @@ def _make_transparent_dispersion_map(
             ax.plot(bx, by, color="#EA580C", linewidth=2.0,
                     solid_capstyle="round", zorder=8)
 
-    # ── Линейка масштаба в левом-нижнем углу ────────────────────────────────
-    # Подбираем "круглую" длину, которая ~20% ширины карты
-    scale_candidates = [50, 100, 200, 250, 500, 1000, 2000, 5000, 10000]
-    target_len = x_length * 0.20
-    bar_len = scale_candidates[0]
-    for c in scale_candidates:
-        if c <= target_len:
-            bar_len = c
-    # Положение и размер
-    bar_x0 = x_length * 0.04
-    bar_y0 = y_length * 0.05
-    bar_h = y_length * 0.008
-    # Тёмный прямоугольник + белая каёмка для контраста
-    ax.add_patch(plt.Rectangle(
-        (bar_x0 - bar_len * 0.005, bar_y0 - bar_h * 0.5),
-        bar_len * 1.01, bar_h * 2.0,
-        facecolor="white", edgecolor="black", linewidth=0.8, zorder=12,
-    ))
-    ax.add_patch(plt.Rectangle(
-        (bar_x0, bar_y0), bar_len, bar_h,
-        facecolor="black", edgecolor="black", linewidth=0.5, zorder=13,
-    ))
-    # Половинная отметка — белая полоска внутри
-    ax.add_patch(plt.Rectangle(
-        (bar_x0 + bar_len / 2, bar_y0), bar_len / 2, bar_h,
-        facecolor="white", edgecolor="black", linewidth=0.5, zorder=14,
-    ))
-    # Подписи 0 / середина / конец
-    if bar_len >= 1000:
-        labels_text = [(0, "0"), (bar_len / 2, f"{int(bar_len/2)} м"), (bar_len, f"{int(bar_len)} м")]
-    else:
-        labels_text = [(0, "0"), (bar_len / 2, f"{int(bar_len/2)}"), (bar_len, f"{int(bar_len)} м")]
-    for x_off, txt in labels_text:
-        ax.text(
-            bar_x0 + x_off, bar_y0 + bar_h * 2.5, txt,
-            ha="center", va="bottom", fontsize=11, fontweight="bold",
-            color="black", zorder=15,
-        )
+    # ── Линейка масштаба — только в PNG для CorelDraw (show_axes=False) ─────
+    # В PDF (show_axes=True) масштаб даёт сама координатная сетка с подписями.
+    if not show_axes:
+        scale_candidates = [50, 100, 200, 250, 500, 1000, 2000, 5000, 10000]
+        target_len = x_length * 0.20
+        bar_len = scale_candidates[0]
+        for c in scale_candidates:
+            if c <= target_len:
+                bar_len = c
+        bar_x0 = x_length * 0.04
+        bar_y0 = y_length * 0.05
+        bar_h = y_length * 0.008
+        ax.add_patch(plt.Rectangle(
+            (bar_x0 - bar_len * 0.005, bar_y0 - bar_h * 0.5),
+            bar_len * 1.01, bar_h * 2.0,
+            facecolor="white", edgecolor="black", linewidth=0.8, zorder=12,
+        ))
+        ax.add_patch(plt.Rectangle(
+            (bar_x0, bar_y0), bar_len, bar_h,
+            facecolor="black", edgecolor="black", linewidth=0.5, zorder=13,
+        ))
+        ax.add_patch(plt.Rectangle(
+            (bar_x0 + bar_len / 2, bar_y0), bar_len / 2, bar_h,
+            facecolor="white", edgecolor="black", linewidth=0.5, zorder=14,
+        ))
+        if bar_len >= 1000:
+            labels_text = [(0, "0"), (bar_len / 2, f"{int(bar_len/2)} м"), (bar_len, f"{int(bar_len)} м")]
+        else:
+            labels_text = [(0, "0"), (bar_len / 2, f"{int(bar_len/2)}"), (bar_len, f"{int(bar_len)} м")]
+        for x_off, txt in labels_text:
+            ax.text(
+                bar_x0 + x_off, bar_y0 + bar_h * 2.5, txt,
+                ha="center", va="bottom", fontsize=11, fontweight="bold",
+                color="black", zorder=15,
+            )
 
     ax.set_xlim(0, x_length)
     ax.set_ylim(0, y_length)
     ax.set_aspect("equal")
 
     if show_axes:
+        # Прямоугольная координатная сетка по периметру:
+        # шаг подписей подбираем "круглым" — 250/500/1000 м
+        tick_candidates = [100, 200, 250, 500, 1000, 2000]
+        # Целимся на 6-10 тиков по большей оси
+        target_tick = max(x_length, y_length) / 8
+        tick_step = tick_candidates[0]
+        for c in tick_candidates:
+            if c <= target_tick:
+                tick_step = c
+        x_ticks = list(np.arange(0, x_length + 1, tick_step))
+        y_ticks = list(np.arange(0, y_length + 1, tick_step))
+        ax.set_xticks(x_ticks)
+        ax.set_yticks(y_ticks)
+        ax.set_xticklabels([f"{int(t)}" for t in x_ticks])
+        ax.set_yticklabels([f"{int(t)}" for t in y_ticks])
         ax.set_xlabel("X, м", fontsize=12)
         ax.set_ylabel("Y, м", fontsize=12)
-        ax.tick_params(labelsize=11)
-        ax.grid(True, alpha=0.3, linestyle="--", color="#888")
+        ax.tick_params(labelsize=11, direction="out", length=4, color="#333")
+        ax.grid(True, alpha=0.35, linestyle="--", color="#666", linewidth=0.6)
+        # Чёрная рамка по периметру
+        for spine in ax.spines.values():
+            spine.set_visible(True)
+            spine.set_color("#333")
+            spine.set_linewidth(1.0)
     else:
         ax.set_axis_off()
 
@@ -890,6 +892,8 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
     grid_data = request_data.get("grid") or {}
     show_axes = bool(request_data.get("map_show_axes", True))
     show_title = bool(request_data.get("map_show_title", True))
+    # Тип карты: "isolines" (по умолчанию) или "grid" (старая ОНД-сетка с числами)
+    map_type = (request_data.get("map_type") or "isolines").lower()
 
     for sub_idx, sub in enumerate(by_subs):
         sub_meta = sub.get("substance") or {}
@@ -899,16 +903,33 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
         if not sub_points:
             continue
         try:
-            png_buf = _make_transparent_dispersion_map(
-                sub_points,
-                sources=sources_for_map,
-                boundary=boundary,
-                pdk=sub_pdk,
-                substance_name=sub_name,
-                show_axes=show_axes,
-                show_title=show_title,
-                grid_data=grid_data,
-            )
+            if map_type == "grid":
+                # Старая сетка ОНД с числами концентраций в ячейках.
+                # _make_concentration_plot ожидает grid_step из grid_data.
+                grid_step = grid_data.get("step", 500) if grid_data else 500
+                title_text = (
+                    f"Карта рассеивания: {sub_name}" if show_title
+                    else "Карта рассеивания ЗВ в приземном слое"
+                )
+                png_buf = _make_concentration_plot(
+                    sub_points,
+                    grid_step=grid_step,
+                    title=title_text,
+                    grid_params=grid_data,
+                    sources=None,        # источники в карте отключены
+                    boundary=boundary,
+                )
+            else:
+                png_buf = _make_transparent_dispersion_map(
+                    sub_points,
+                    sources=sources_for_map,
+                    boundary=boundary,
+                    pdk=sub_pdk,
+                    substance_name=sub_name,
+                    show_axes=show_axes,
+                    show_title=show_title,
+                    grid_data=grid_data,
+                )
             if png_buf is None:
                 continue
 

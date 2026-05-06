@@ -128,6 +128,10 @@ class CalculationRequest(BaseModel):
     # Готовый результат расчёта с фронта — позволяет пропустить пересчёт в /export/pdf
     # и /export/excel. Структура совпадает с тем, что вернул /api/calculate.
     precomputed_result: Optional[dict] = None
+    # Тип карты рассеивания в PDF:
+    #   "isolines" — изолинии в долях ПДК с залитыми контурами (по умолчанию)
+    #   "grid"     — старая сетка ОНД с числами концентраций в ячейках
+    map_type: Optional[str] = "isolines"
 
 
 class GridPoint(BaseModel):

@@ -480,10 +480,10 @@ export default function App() {
     }
   };
 
-  // Опциональный флаг: рисовать ли оси и заголовок на карте в PDF.
-  // По умолчанию — да. Можно выключить (тогда карта получится "чистой"
-  // для наложения в CorelDraw).
-  const [pdfShowAxes, setPdfShowAxes] = useState(true);
+  // Тип карты рассеивания в PDF:
+  //   "isolines" — изолинии в долях ПДК с цветной заливкой
+  //   "grid"     — старая ОНД-сетка с числами концентраций в ячейках
+  const [pdfMapType, setPdfMapType] = useState("isolines");
 
   // Экспорт PDF
   const handleExportPdf = async () => {
@@ -495,13 +495,17 @@ export default function App() {
     try {
       const pdk = Math.min(...sources.map(s => s.pdk ?? 0.5));
       // Передаём уже готовые результаты — бэкенд пропустит пересчёт.
+      // Для типа "grid" оси не нужны (внутри сетки уже свои оси и подписи).
+      // Для "isolines" — оси и заголовок включены, фон белый.
+      const showAxesInPdf = pdfMapType !== "grid";
       await exportPdf({
         sources, meteo, grid, pdk,
         substance: sources[0]?.substance || selectedSubstance,
         enterprise,
         precomputed_result: result,
-        map_show_axes: pdfShowAxes,
-        map_show_title: pdfShowAxes, // заголовок и оси переключаем вместе
+        map_type: pdfMapType,
+        map_show_axes: showAxesInPdf,
+        map_show_title: showAxesInPdf,
       });
     } catch (e) {
       const detail = e?.response?.data?.detail || e?.message || "неизвестная ошибка";
@@ -949,8 +953,8 @@ export default function App() {
             exportingPng={exportingPng}
             onExportExcel={handleExportExcel}
             exportingExcel={exportingExcel}
-            pdfShowAxes={pdfShowAxes}
-            onTogglePdfShowAxes={setPdfShowAxes}
+            pdfMapType={pdfMapType}
+            onChangePdfMapType={setPdfMapType}
             t={t}
           />
 
