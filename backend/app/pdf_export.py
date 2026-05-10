@@ -950,13 +950,18 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
         sub_headers = ["Код", "Вещество", "Cmax, мг/м³", "ПДК м.р.", "Cmax/ПДК", "Статус"]
         sub_rows = [sub_headers]
         for sub in by_subs:
+            # Поддерживаем две формы данных:
+            #  (а) precomputed_result от фронта — name/code на верхнем уровне sub
+            #  (б) recomputed на бэке — name/code внутри sub["substance"]
             sub_meta = sub.get("substance") or {}
+            sub_name = sub_meta.get("name") or sub.get("name") or "—"
+            sub_code = sub_meta.get("code") or sub.get("code") or "—"
             sub_pdk = sub.get("pdk") or 0.5
             max_c = sub.get("max_c", 0)
             ratio = (max_c / sub_pdk) if sub_pdk > 0 else 0
             sub_rows.append([
-                str(sub_meta.get("code") or sub.get("code") or "—"),
-                str(sub_meta.get("name") or "—"),
+                str(sub_code),
+                str(sub_name),
                 f"{max_c:.4f}",
                 f"{sub_pdk:.3f}",
                 f"{ratio:.3f}",
@@ -995,8 +1000,15 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
     )
 
     for sub_idx, sub in enumerate(by_subs):
+        # Поддерживаем две формы: name/code как на верхнем уровне (precomputed
+        # от фронта), так и внутри sub["substance"] (recomputed на бэкенде).
         sub_meta = sub.get("substance") or {}
-        sub_name = sub_meta.get("name") or sub.get("code") or f"Вещество {sub_idx + 1}"
+        sub_name = (
+            sub_meta.get("name")
+            or sub.get("name")
+            or sub.get("code")
+            or f"Вещество {sub_idx + 1}"
+        )
         sub_points = sub.get("points", [])
         sub_pdk = sub.get("pdk") or 0.5
         if not sub_points:
