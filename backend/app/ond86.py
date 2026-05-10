@@ -157,7 +157,7 @@ def _cold_source(M, H, D, w0, A, F, eta) -> dict:
 def _compute_single_direction(sources, sigma_coeff, A, Ta, wd_rad, grid_lats, grid_lons):
     """
     Рассчитывает поле концентраций для одного направления ветра.
-    Возвращает total_c (г/м³) и src_results.
+    Возвращает total_c (мг/м³) и src_results [{name, cm_mg, xm}, ...].
     """
     total_c = np.zeros(len(grid_lats))
     src_results = []
@@ -210,6 +210,50 @@ def _compute_single_direction(sources, sigma_coeff, A, Ta, wd_rad, grid_lats, gr
         total_c += Cm * s1_vals * s2_vals
 
     return total_c, src_results
+
+
+def _per_source_at_point(sources, sigma_coeff, A, Ta, wd_rad, target_lat, target_lon):
+    """
+    Для одной точки (target_lat, target_lon) и одного направления ветра wd_rad
+    возвращает список вкладов от каждого источника:
+        [{"name": str, "src_index": int, "contribution_mg": float}, ...]
+    Используется при формировании Таблицы 13 «Наибольшие концентрации».
+    """
+    contributions = []
+    for src_idx, src in enumerate(sources):
+        M = src.get_emission_gs()
+        if M <= 0:
+            contributions.append({"name": src.name, "src_index": src_idx, "contribution_mg": 0.0})
+            continue
+
+        params = calc_source_params(
+            M=M, H=src.height, D=src.diameter, w0=src.velocity,
+            Tg=src.temperature, Ta=Ta, A=A,
+        )
+        Cm = params["Cm"]
+        Xm = params["Xm"]
+        if Cm <= 0 or Xm <= 0:
+            contributions.append({"name": src.name, "src_index": src_idx, "contribution_mg": 0.0})
+            continue
+
+        src_lat_rad = src.lat * np.pi / 180.0
+        dx_e = (target_lon - src.lon) * 111_000.0 * np.cos(src_lat_rad)
+        dy_n = (target_lat - src.lat) * 111_000.0
+        x_wind = -(dx_e * np.sin(wd_rad) + dy_n * np.cos(wd_rad))
+        y_wind = dx_e * np.cos(wd_rad) - dy_n * np.sin(wd_rad)
+
+        if x_wind <= 0:
+            contributions.append({"name": src.name, "src_index": src_idx, "contribution_mg": 0.0})
+            continue
+
+        r = x_wind / Xm
+        # _s1_vectorized и _s2_vectorized работают и со скалярами через np.array
+        s1 = float(_s1_vectorized(np.array([r]))[0])
+        s2 = float(_s2_vectorized(np.array([y_wind]), np.array([x_wind]), sigma_coeff)[0])
+        c_mg = float(Cm * s1 * s2)
+        contributions.append({"name": src.name, "src_index": src_idx, "contribution_mg": c_mg})
+
+    return contributions
 
 
 def compute_grid(sources, meteo, city_data: dict,
@@ -279,7 +323,10 @@ def compute_grid(sources, meteo, city_data: dict,
     if wind_mode == "360":
         # ---------- Полный обзор 360° ----------
         # 36 направлений с шагом 10°, в каждой точке берём МАКСИМУМ
-        total_c_max = np.zeros(len(grid_lats))
+        # и запоминаем то направление, при котором максимум достигнут.
+        n_pts = len(grid_lats)
+        total_c_max = np.zeros(n_pts)
+        dir_at_max = np.full(n_pts, -1, dtype=int)  # угол в градусах, -1 = "никакое"
         src_results = None
 
         for angle_deg in range(0, 360, 10):
@@ -288,11 +335,13 @@ def compute_grid(sources, meteo, city_data: dict,
                 sources, sigma_coeff, A, meteo.temperature, wd_rad,
                 grid_lats, grid_lons,
             )
-            total_c_max = np.maximum(total_c_max, c_dir)
+            higher = c_dir > total_c_max
+            total_c_max = np.where(higher, c_dir, total_c_max)
+            dir_at_max = np.where(higher, angle_deg, dir_at_max)
             if src_results is None:
                 src_results = sr  # параметры Cm/Xm не зависят от направления
 
-        total_mg = total_c_max  # формула ОНД-86 уже даёт мг/м³
+        total_mg = total_c_max
     else:
         # ---------- Одно направление ----------
         wd_rad = meteo.wind_direction * np.pi / 180.0
@@ -300,12 +349,13 @@ def compute_grid(sources, meteo, city_data: dict,
             sources, sigma_coeff, A, meteo.temperature, wd_rad,
             grid_lats, grid_lons,
         )
-        total_mg = total_c  # формула ОНД-86 уже даёт мг/м³
+        total_mg = total_c
+        dir_at_max = np.full(len(grid_lats), int(meteo.wind_direction), dtype=int)
 
     if src_results is None:
         src_results = []
 
-    return grid_lats, grid_lons, total_mg, src_results
+    return grid_lats, grid_lons, total_mg, src_results, dir_at_max
 
 
 def compute_szz_boundary(grid_lats, grid_lons, total_mg, pdk, center_lat, center_lon):
@@ -457,13 +507,77 @@ def compute_per_substance(sources, meteo, city_data, **grid_kwargs):
             if current_pdk and current_pdk < substance_groups[code]["pdk"]:
                 substance_groups[code]["pdk"] = current_pdk
 
+    # Параметры для _per_source_at_point (нужны для top-N)
+    A_factor = city_data.get("A", 200)
+    sigma_coeff = STABILITY_SIGMA.get(meteo.stability_class, 0.08)
+
+    def _build_top_n(proxies_or_sources, lats_arr, lons_arr, total_mg_arr,
+                      dir_at_max_arr, pdk_value, top_n=10):
+        """Top-N точек по убыванию концентрации, с per-source вкладами в каждой."""
+        if len(total_mg_arr) == 0:
+            return []
+        # Берём индексы top-N (по убыванию)
+        n = min(top_n, len(total_mg_arr))
+        top_idx = np.argpartition(-total_mg_arr, n - 1)[:n]
+        top_idx = top_idx[np.argsort(-total_mg_arr[top_idx])]
+
+        # Координаты сетки в метрах от left-bottom угла (как в Радуге)
+        origin_lat_grid = float(np.min(lats_arr))
+        origin_lon_grid = float(np.min(lons_arr))
+        lat_rad_grid = origin_lat_grid * np.pi / 180.0
+
+        result = []
+        for idx in top_idx:
+            i = int(idx)
+            angle = int(dir_at_max_arr[i])
+            wd_rad = angle * np.pi / 180.0
+            point_lat = float(lats_arr[i])
+            point_lon = float(lons_arr[i])
+            c_mg = float(total_mg_arr[i])
+            # Вклад каждого источника
+            contrib_list = _per_source_at_point(
+                proxies_or_sources, sigma_coeff, A_factor,
+                meteo.temperature, wd_rad, point_lat, point_lon,
+            )
+            # Сортируем по убыванию вклада, фильтруем нулевые
+            contrib_sorted = sorted(
+                [c for c in contrib_list if c["contribution_mg"] > 0],
+                key=lambda c: -c["contribution_mg"],
+            )
+            # Метры от левого-нижнего угла сетки (как X, Y в Радуге)
+            x_m = (point_lon - origin_lon_grid) * 111_000.0 * np.cos(lat_rad_grid)
+            y_m = (point_lat - origin_lat_grid) * 111_000.0
+            result.append({
+                "qh": (c_mg / pdk_value) if pdk_value > 0 else 0.0,
+                "c_mg": c_mg,
+                "x_m": round(x_m),
+                "y_m": round(y_m),
+                "lat": point_lat,
+                "lon": point_lon,
+                "wind_dir_deg": angle if angle >= 0 else None,
+                "wind_speed_ms": float(meteo.wind_speed),
+                "contributions": [
+                    {
+                        "src_index": c["src_index"],
+                        "name": c["name"],
+                        "contribution_mg": round(c["contribution_mg"], 6),
+                        "contribution_pdk": round(
+                            c["contribution_mg"] / pdk_value if pdk_value > 0 else 0.0, 6,
+                        ),
+                    }
+                    for c in contrib_sorted
+                ],
+            })
+        return result
+
     # Если ничего не задано — fallback к старой логике (один общий расчёт)
     if not substance_groups:
-        lats, lons, total_mg, src_results = compute_grid(
+        lats, lons, total_mg, src_results, dir_at_max = compute_grid(
             sources=sources, meteo=meteo, city_data=city_data, **grid_kwargs,
         )
         max_idx = int(total_mg.argmax()) if len(total_mg) else 0
         max_c = float(total_mg[max_idx]) if len(total_mg) else 0.0
+        top_pts = _build_top_n(sources, lats, lons, total_mg, dir_at_max, 0.5)
         return {
             "by_substance": {
                 "unknown": {
@@ -479,6 +593,7 @@ def compute_per_substance(sources, meteo, city_data, **grid_kwargs):
                         {"lat": float(lats[i]), "lon": float(lons[i]), "c": float(total_mg[i])}
                         for i in range(len(lats))
                     ],
+                    "top_points": top_pts,
                 }
             },
             "primary_code": "unknown",
@@ -492,7 +607,7 @@ def compute_per_substance(sources, meteo, city_data, **grid_kwargs):
 
     for code, group in substance_groups.items():
         proxies = [_SubstanceSourceProxy(src, em_gs) for src, em_gs in group["pairs"]]
-        lats, lons, total_mg, src_results = compute_grid(
+        lats, lons, total_mg, src_results, dir_at_max = compute_grid(
             sources=proxies, meteo=meteo, city_data=city_data, **grid_kwargs,
         )
         if common_lats is None:
@@ -515,6 +630,9 @@ def compute_per_substance(sources, meteo, city_data, **grid_kwargs):
                 "hazard_class": sub_meta.hazard_class,
             }
 
+        # Top-10 точек с вкладами источников (для Таблицы 13 «Наибольшие концентрации»)
+        top_pts = _build_top_n(proxies, lats, lons, total_mg, dir_at_max, pdk_value)
+
         by_substance[code] = {
             "substance": sub_dict,
             "pdk": pdk_value,
@@ -528,6 +646,7 @@ def compute_per_substance(sources, meteo, city_data, **grid_kwargs):
                 {"lat": float(lats[i]), "lon": float(lons[i]), "c": float(total_mg[i])}
                 for i in range(len(lats))
             ],
+            "top_points": top_pts,
         }
 
     # Главное вещество — с наибольшим отношением max_c / pdk

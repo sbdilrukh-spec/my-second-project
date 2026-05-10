@@ -11,7 +11,8 @@ from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 
 from .models import (
     CalculationRequest, CalculationResponse, GridPoint, SourceResult,
-    SubstanceResult, SzzResult, SzzBoundaryPoint,
+    SubstanceResult, TopPoint, TopPointContribution,
+    SzzResult, SzzBoundaryPoint,
 )
 from .meteo_data import CITIES
 from .ond86 import compute_grid, compute_szz_boundary, compute_per_substance
@@ -386,6 +387,21 @@ def calculate(req: CalculationRequest):
     by_substance = []
     for code, data in multi["by_substance"].items():
         sub_meta = data.get("substance") or {}
+        top_pts_raw = data.get("top_points") or []
+        top_pts = [
+            TopPoint(
+                qh=round(tp["qh"], 6),
+                c_mg=round(tp["c_mg"], 6),
+                x_m=tp["x_m"],
+                y_m=tp["y_m"],
+                lat=tp["lat"],
+                lon=tp["lon"],
+                wind_dir_deg=tp.get("wind_dir_deg"),
+                wind_speed_ms=tp["wind_speed_ms"],
+                contributions=[TopPointContribution(**c) for c in tp["contributions"]],
+            )
+            for tp in top_pts_raw
+        ]
         by_substance.append(SubstanceResult(
             code=code if code != "unknown" else (sub_meta.get("code") if sub_meta else None),
             name=sub_meta.get("name") if sub_meta else None,
@@ -401,6 +417,7 @@ def calculate(req: CalculationRequest):
                 for p in data["points"]
             ],
             source_results=[SourceResult(**sr) for sr in data["source_results"]],
+            top_points=top_pts,
         ))
 
     # Главное (худшее) вещество — поля для обратной совместимости
@@ -454,7 +471,7 @@ def get_tables(req: CalculationRequest):
 
     city_data = CITIES.get(req.meteo.city, {"A": 200})
 
-    lats, lons, total_mg, src_results = compute_grid(
+    lats, lons, total_mg, src_results, _dir_at_max = compute_grid(
         sources=req.sources,
         meteo=req.meteo,
         city_data=city_data,
@@ -540,6 +557,7 @@ def _export_pdf_inner(req: CalculationRequest):
                     "ratio_to_pdk": data["ratio_to_pdk"],
                     "points": data["points"],
                     "source_results": data["source_results"],
+                    "top_points": data.get("top_points") or [],
                 }
                 for code, data in multi["by_substance"].items()
             ],
@@ -563,7 +581,7 @@ def _export_pdf_inner(req: CalculationRequest):
 def export_excel(req: CalculationRequest):
     city_data = CITIES.get(req.meteo.city, {"A": 200})
 
-    lats, lons, total_mg, src_results = compute_grid(
+    lats, lons, total_mg, src_results, _dir_at_max = compute_grid(
         sources=req.sources,
         meteo=req.meteo,
         city_data=city_data,

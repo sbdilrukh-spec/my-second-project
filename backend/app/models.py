@@ -160,6 +160,27 @@ class SzzResult(BaseModel):
     area_ha: float
 
 
+class TopPointContribution(BaseModel):
+    """Вклад одного источника в концентрацию в одной из top-N точек."""
+    src_index: int
+    name: str
+    contribution_mg: float
+    contribution_pdk: float
+
+
+class TopPoint(BaseModel):
+    """Одна из top-N «наибольших концентраций» — для Таблицы 13 (Радуга)."""
+    qh: float                      # концентрация в долях ПДК
+    c_mg: float                    # концентрация, мг/м³
+    x_m: int                       # X относительно левого-нижнего угла сетки, м
+    y_m: int
+    lat: float
+    lon: float
+    wind_dir_deg: Optional[int] = None  # HB — направление ветра, при котором достигнут максимум
+    wind_speed_ms: float                # U — скорость ветра, м/с
+    contributions: List[TopPointContribution]
+
+
 class SubstanceResult(BaseModel):
     """Результат расчёта по одному веществу."""
     code: Optional[str] = None
@@ -173,6 +194,7 @@ class SubstanceResult(BaseModel):
     points: List[GridPoint]
     source_results: List[SourceResult]
     hazard_class: Optional[int] = None
+    top_points: Optional[List[TopPoint]] = None
 
 
 class CalculationResponse(BaseModel):

@@ -831,64 +831,163 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
         ParagraphStyle("date", fontName=FONT, fontSize=9, alignment=TA_CENTER, spaceAfter=16),
     ))
 
-    # --- 1. Источники выбросов ---
-    story.append(Paragraph("1. Параметры источников выбросов", h1_style))
-    src_headers = ["Название", "H, м", "D, м", "w₀, м/с", "Tг, °C", "M, г/с", "M, т/год"]
+    # ============================================================
+    # ТАБЛИЦА 1 «Исходные данные» — сводка по объекту (Радуга-стиль)
+    # ============================================================
+    sources_list = request_data.get("sources", []) or []
+    by_subs_for_t1 = result_data.get("by_substance") or []
+    enterprise_t1 = request_data.get("enterprise") or {}
+    obj_name = enterprise_t1.get("name") or "—"
+    meteo_t1 = request_data.get("meteo", {}) or {}
+    grid_t1 = request_data.get("grid", {}) or {}
+
+    story.append(Paragraph(
+        "1. Исходные данные. Метеорологические характеристики и коэффициенты, "
+        "определяющие условия рассеивания загрязняющих веществ в атмосфере",
+        h1_style,
+    ))
+    story.append(Paragraph(f"<b>Объект:</b> {obj_name}", body_style))
+    story.append(Spacer(1, 0.1 * cm))
+    n_subs = len(by_subs_for_t1)
+    n_srcs = len(sources_list)
+    t1_rows = [
+        ["Параметр", "Значение"],
+        ["Число источников", str(n_srcs)],
+        ["Число рассматриваемых вредных веществ", str(n_subs)],
+        ["Число групп суммирования", "0"],
+        ["Средняя максимальная температура наружного воздуха, °C",
+         f"{meteo_t1.get('temperature', '—')}"],
+        ["Коэффициент, зависящий от стратификации атмосферы (A)",
+         "200"],   # для Узбекистана/средней Азии типично
+        ["Скорость ветра (повторяемость превышения 5%), м/с",
+         f"{meteo_t1.get('wind_speed', '—')}"],
+        ["Класс устойчивости атмосферы", meteo_t1.get("stability_class", "—")],
+        ["Город / регион", meteo_t1.get("city", "—")],
+        ["Расчётная область, м", f"{grid_t1.get('x_length', '—')} × {grid_t1.get('y_length', '—')}"],
+        ["Шаг сетки, м", f"{grid_t1.get('step', '—')}"],
+    ]
+    t1 = Table(t1_rows, colWidths=[W * 0.65, W * 0.35])
+    t1.setStyle(TABLE_STYLE)
+    story.append(t1)
+    story.append(Spacer(1, 0.4 * cm))
+
+    # ============================================================
+    # ТАБЛИЦА 7 «Параметры источников» (Радуга-стиль)
+    # ============================================================
+    story.append(Paragraph("7. Параметры источников выбросов", h1_style))
+    src_headers = [
+        "№ ист.", "H, м", "D, м", "w₀, м/с",
+        "V, м³/с", "Tг, °C", "Lat", "Lon", "Назв.",
+    ]
     src_rows = [src_headers]
-    for s in request_data.get("sources", []):
-        M_gs = s.get("emission_gs") or 0.0
-        M_ty = s.get("emission_ty") or 0.0
-        if not M_gs and M_ty:
-            M_gs = round(M_ty * 1_000_000 / (365.25 * 24 * 3600), 4)
-        if not M_ty and M_gs:
-            M_ty = round(M_gs * 365.25 * 24 * 3600 / 1_000_000, 4)
+    for idx, s in enumerate(sources_list, 1):
+        d = s.get("diameter") or 0.0
+        w = s.get("velocity") or 0.0
+        # Объём газовоздушной смеси V = π·D²/4 · w₀
+        try:
+            V = round(3.14159265 * (float(d) ** 2) / 4.0 * float(w), 4)
+        except (TypeError, ValueError):
+            V = "—"
         src_rows.append([
-            s.get("name", "—"),
+            f"{idx:02d}",
             str(s.get("height", "—")),
             str(s.get("diameter", "—")),
             str(s.get("velocity", "—")),
+            str(V),
             str(s.get("temperature", "—")),
-            str(round(M_gs, 4)),
-            str(round(M_ty, 4)),
+            f"{s.get('lat', 0):.5f}" if s.get("lat") is not None else "—",
+            f"{s.get('lon', 0):.5f}" if s.get("lon") is not None else "—",
+            (s.get("name") or "")[:18],
         ])
-    col_w = [W * f for f in [0.24, 0.10, 0.10, 0.12, 0.12, 0.16, 0.16]]
-    t = Table(src_rows, colWidths=col_w)
-    t.setStyle(TABLE_STYLE)
-    story.append(t)
+    col_w = [W * f for f in [0.07, 0.07, 0.07, 0.09, 0.10, 0.07, 0.13, 0.13, 0.27]]
+    t7 = Table(src_rows, colWidths=col_w)
+    t7.setStyle(TABLE_STYLE)
+    story.append(t7)
     story.append(Spacer(1, 0.4 * cm))
 
-    # --- 2. Метеоусловия ---
-    story.append(Paragraph("2. Метеорологические условия", h1_style))
-    meteo = request_data.get("meteo", {})
-    meteo_rows = [
-        ["Параметр", "Значение"],
-        ["Город / регион", meteo.get("city", "—")],
-        ["Скорость ветра", f"{meteo.get('wind_speed', '—')} м/с"],
-        ["Направление ветра (откуда)", f"{meteo.get('wind_direction', '—')}°"],
-        ["Класс устойчивости атмосферы", meteo.get("stability_class", "—")],
-        ["Температура воздуха", f"{meteo.get('temperature', '—')} °C"],
-    ]
-    tm = Table(meteo_rows, colWidths=[W * 0.6, W * 0.4])
-    tm.setStyle(TABLE_STYLE)
-    story.append(tm)
-    story.append(Spacer(1, 0.4 * cm))
+    # ============================================================
+    # ТАБЛИЦА 8 «Характеристика выбросов» — по веществам и источникам (Радуга)
+    # ============================================================
+    story.append(Paragraph("8. Характеристика выбросов", h1_style))
 
-    # --- 3. Результаты по каждому источнику ---
-    story.append(Paragraph("3. Результаты расчёта по источникам", h1_style))
-    res_headers = ["Источник", "Cm, мг/м³", "Xm, м"]
-    res_rows = [res_headers]
-    for sr in result_data.get("source_results", []):
-        res_rows.append([
-            sr.get("name", "—"),
-            str(round(sr.get("cm_mg", 0), 4)),
-            str(round(sr.get("xm", 0), 1)),
-        ])
-    tr = Table(res_rows, colWidths=[W * 0.50, W * 0.25, W * 0.25])
-    tr.setStyle(TABLE_STYLE)
-    story.append(tr)
-    story.append(Spacer(1, 0.4 * cm))
+    # Группируем источники по веществам: substance_code → [(src_idx, src_name, em_gs, em_ty)]
+    subs_emissions = {}
+    subs_meta_map = {}
+    for src_idx, src in enumerate(sources_list, 1):
+        emissions = src.get("emissions") or []
+        # Если emissions пуст — старый формат с одним веществом
+        if not emissions and (src.get("emission_gs") or src.get("substance")):
+            emissions = [{
+                "substance": src.get("substance"),
+                "emission_gs": src.get("emission_gs"),
+                "emission_ty": src.get("emission_ty"),
+                "pdk": src.get("pdk"),
+            }]
+        for em in emissions:
+            sub = em.get("substance") or {}
+            code = sub.get("code") or "—"
+            em_gs = em.get("emission_gs") or 0.0
+            em_ty = em.get("emission_ty") or 0.0
+            # Конвертация если задано только одно из значений
+            if (not em_gs) and em_ty:
+                em_gs = em_ty * 1_000_000 / (365.25 * 24 * 3600)
+            if (not em_ty) and em_gs:
+                em_ty = em_gs * 365.25 * 24 * 3600 / 1_000_000
+            if not em_gs:
+                continue
+            entry = subs_emissions.setdefault(code, [])
+            entry.append({
+                "src_idx": src_idx,
+                "src_name": src.get("name") or f"Источник {src_idx}",
+                "em_gs": em_gs,
+                "em_ty": em_ty,
+            })
+            if code not in subs_meta_map:
+                subs_meta_map[code] = {
+                    "code": code,
+                    "name": sub.get("name") or "—",
+                    "pdk_mr": em.get("pdk") or sub.get("pdk_mr") or 0.5,
+                    "hazard_class": sub.get("hazard_class"),
+                }
 
-    # --- 4. Итог ---
+    if not subs_emissions:
+        story.append(Paragraph("<i>Выбросы веществ не заданы.</i>", body_style))
+    else:
+        for code, entries in subs_emissions.items():
+            sub_meta = subs_meta_map.get(code, {})
+            sub_name = sub_meta.get("name") or "—"
+            pdk_val = sub_meta.get("pdk_mr") or 0.5
+            hazard = sub_meta.get("hazard_class") or "—"
+            total_gs = sum(e["em_gs"] for e in entries)
+            total_ty = sum(e["em_ty"] for e in entries)
+            # Шапка вещества
+            story.append(Paragraph(
+                f"<b>Код {code}</b> · <b>{sub_name}</b> · "
+                f"ПДК={pdk_val} мг/м³ · Класс опасн.={hazard} · "
+                f"Источников={len(entries)} · Σ т/год={round(total_ty, 4)} · "
+                f"Σ г/с={round(total_gs, 6)}",
+                body_style,
+            ))
+            # Подтаблица: построчно по источникам
+            t8_headers = ["№ ист.", "Название", "г/с", "т/год"]
+            t8_rows = [t8_headers]
+            for e in entries:
+                t8_rows.append([
+                    f"{e['src_idx']:02d}",
+                    (e["src_name"] or "")[:30],
+                    f"{e['em_gs']:.6f}",
+                    f"{e['em_ty']:.4f}",
+                ])
+            t8 = Table(t8_rows, colWidths=[W * 0.10, W * 0.50, W * 0.20, W * 0.20])
+            t8.setStyle(TABLE_STYLE)
+            story.append(t8)
+            story.append(Spacer(1, 0.25 * cm))
+
+    story.append(Spacer(1, 0.3 * cm))
+
+    # ============================================================
+    # 4. Суммарные результаты — оставляем для итогового вердикта (как было)
+    # ============================================================
     story.append(Paragraph("4. Суммарные результаты", h1_style))
     pdk_val = result_data.get("pdk", 0.5)
     max_c = result_data.get("max_c", 0.0)
@@ -896,11 +995,11 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
 
     summary_rows = [
         ["Показатель", "Значение"],
-        ["ПДК загрязняющего вещества", f"{pdk_val} мг/м³"],
+        ["ПДК главного вещества (Cmax / ПДК максимально)", f"{pdk_val} мг/м³"],
         ["Максимальная расчётная концентрация", f"{round(max_c, 5)} мг/м³"],
         ["Доля ПДК (Cmax / ПДК)", f"{round(max_c / pdk_val, 3) if pdk_val else '—'}"],
-        ["Расчётная область (радиус)", f"{request_data.get('grid', {}).get('radius', '—')} м"],
-        ["Шаг сетки", f"{request_data.get('grid', {}).get('step', '—')} м"],
+        ["Расчётная область, м", f"{request_data.get('grid', {}).get('x_length', '—')} × {request_data.get('grid', {}).get('y_length', '—')}"],
+        ["Шаг сетки, м", f"{request_data.get('grid', {}).get('step', '—')}"],
     ]
     ts = Table(summary_rows, colWidths=[W * 0.6, W * 0.4])
     ts.setStyle(TABLE_STYLE)
@@ -974,8 +1073,108 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
         story.append(sub_tbl)
         story.append(Spacer(1, 0.4 * cm))
 
-    # --- 6. Карты рассеивания (прозрачные, для наложения в CorelDraw) ---
+    # ============================================================
+    # ТАБЛИЦА 13 «Наибольшие концентрации» (Радуга-стиль)
+    # Top-10 точек по убыванию QH с разбивкой по источникам.
+    # ============================================================
     from reportlab.platypus import PageBreak
+
+    has_any_top = any(
+        sub.get("top_points") for sub in (result_data.get("by_substance") or [])
+    )
+    if has_any_top:
+        story.append(PageBreak())
+        story.append(Paragraph(
+            "13. Наибольшие концентрации", h1_style,
+        ))
+        story.append(Paragraph(
+            "<i>Условные обозначения: <b>QH</b> — концентрация в точке (доли ПДК); "
+            "<b>X, Y</b> — координаты точки в метрах от левого-нижнего угла сетки; "
+            "<b>HB</b> — направление ветра (град.), при котором достигнут максимум; "
+            "<b>U</b> — скорость ветра (м/с); далее — top-источников по вкладу.</i>",
+            body_style,
+        ))
+        story.append(Spacer(1, 0.2 * cm))
+
+        for sub in (result_data.get("by_substance") or []):
+            top_points = sub.get("top_points") or []
+            if not top_points:
+                continue
+            # Имя/код вещества (поддерживаем обе формы: precomputed и recomputed)
+            sub_meta_in = sub.get("substance") or {}
+            sub_name = (
+                sub_meta_in.get("name")
+                or sub.get("name")
+                or sub_meta_in.get("code")
+                or sub.get("code")
+                or "—"
+            )
+            sub_code = sub_meta_in.get("code") or sub.get("code") or "—"
+            sub_pdk_v = sub.get("pdk") or 0.5
+
+            story.append(Paragraph(
+                f"<b>Вещество:</b> {sub_name} (код {sub_code}) · ПДК = {sub_pdk_v} мг/м³",
+                body_style,
+            ))
+            story.append(Spacer(1, 0.1 * cm))
+
+            # Считаем максимальное число вкладов в одной точке среди top_points,
+            # чтобы определить число колонок для источников. Не больше 4 (как в Радуге).
+            max_contribs = min(4, max((len(tp.get("contributions") or []) for tp in top_points), default=0))
+
+            t13_headers = ["QH", "X, м", "Y, м", "HB, °", "U, м/с"]
+            for i in range(max_contribs):
+                t13_headers.extend([f"№ ист.{i+1}", "Вклад"])
+
+            t13_rows = [t13_headers]
+            for tp in top_points:
+                row = [
+                    f"{tp.get('qh', 0):.4f}",
+                    str(tp.get("x_m", 0)),
+                    str(tp.get("y_m", 0)),
+                    str(tp.get("wind_dir_deg") if tp.get("wind_dir_deg") is not None else "—"),
+                    f"{tp.get('wind_speed_ms', 0):.1f}",
+                ]
+                contribs = tp.get("contributions") or []
+                for i in range(max_contribs):
+                    if i < len(contribs):
+                        c = contribs[i]
+                        # Номер источника берём из src_index +1
+                        si = c.get("src_index", 0) + 1
+                        row.append(f"{si:02d}")
+                        row.append(f"{c.get('contribution_pdk', 0):.4f}")
+                    else:
+                        row.append("")
+                        row.append("")
+                t13_rows.append(row)
+
+            # Ширина колонок: QH+X+Y+HB+U = 5 базовых, дальше пары "источник+вклад"
+            base_w = [W * 0.10, W * 0.07, W * 0.07, W * 0.07, W * 0.07]
+            remaining = W - sum(base_w)
+            if max_contribs > 0:
+                pair_w = remaining / max_contribs
+                src_col_w = pair_w * 0.35
+                contrib_col_w = pair_w * 0.65
+                col_w_t13 = base_w + [src_col_w if i % 2 == 0 else contrib_col_w
+                                       for i in range(max_contribs * 2)]
+            else:
+                col_w_t13 = base_w
+                # Растягиваем последнюю колонку на остаток
+                col_w_t13[-1] += remaining
+
+            t13 = Table(t13_rows, colWidths=col_w_t13)
+            t13.setStyle(TABLE_STYLE)
+            story.append(t13)
+            story.append(Paragraph(
+                f"<i>Минимум/максимум QH в этой выборке: "
+                f"{top_points[-1].get('qh', 0):.6f} / {top_points[0].get('qh', 0):.6f}</i>",
+                ParagraphStyle("t13_minmax", fontName=FONT, fontSize=8,
+                                textColor=colors.HexColor("#475569"),
+                                alignment=TA_LEFT, spaceAfter=2),
+            ))
+            story.append(Spacer(1, 0.4 * cm))
+
+    # --- 6. Карты рассеивания (прозрачные, для наложения в CorelDraw) ---
 
     enterprise = request_data.get("enterprise") or {}
     boundary = (enterprise.get("boundary") or [])
