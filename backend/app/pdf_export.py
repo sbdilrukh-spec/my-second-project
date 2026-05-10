@@ -443,18 +443,19 @@ _PDK_COLOR_MAP = [
 ]
 
 
-def _color_legend_html() -> str:
-    """HTML для ReportLab Paragraph: цветные плашки с подписями уровней."""
+def _color_legend_html(present_levels=None) -> str:
+    """HTML для ReportLab Paragraph: цветной квадрат + подпись уровня.
+    Используем простой `<font color>` (а не `backColor`) — он легче
+    разбирается ReportLab и не валит сборку PDF на длинных строках.
+    Если передан present_levels — выводим только эти уровни.
+    """
     parts = []
     for label, color in _PDK_COLOR_MAP:
-        # Белый текст на тёмных оттенках, чёрный — на светлых
-        text_color = "#fff" if color in ("#3B82F6", "#14B8A6", "#22C55E",
-                                          "#DC2626", "#991B1B", "#581C87") else "#111"
-        parts.append(
-            f'<font backColor="{color}" color="{text_color}">'
-            f'&nbsp;{label}&nbsp;</font>'
-        )
-    return " ".join(parts)
+        if present_levels is not None and label not in present_levels:
+            continue
+        # ■ — заполненный квадрат, прокрашен цветом уровня. Подпись — обычным.
+        parts.append(f'<font color="{color}" size="11">■</font>&nbsp;{label}')
+    return "&nbsp;&nbsp;".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -938,6 +939,17 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
     # Тип карты: "isolines" (по умолчанию) или "grid" (старая ОНД-сетка с числами)
     map_type = (request_data.get("map_type") or "isolines").lower()
 
+    # Стили легенды и примечания — один раз, потом переиспользуем
+    legend_style = ParagraphStyle(
+        "color_legend", fontName=FONT, fontSize=10,
+        alignment=TA_CENTER, spaceAfter=4, leading=14,
+    )
+    note_style = ParagraphStyle(
+        "map_note", fontName=FONT, fontSize=8,
+        alignment=TA_LEFT, textColor=colors.HexColor("#475569"),
+        leftIndent=4, rightIndent=4, spaceAfter=4, leading=11,
+    )
+
     for sub_idx, sub in enumerate(by_subs):
         sub_meta = sub.get("substance") or {}
         sub_name = sub_meta.get("name") or sub.get("code") or f"Вещество {sub_idx + 1}"
@@ -1011,30 +1023,26 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
 
             # Цветовая легенда + примечание (только для типа "isolines",
             # для "grid" они не нужны — там значения прямо в ячейках).
+            # Изолируем в свой try/except — если что-то с разметкой,
+            # карта останется в PDF, упадёт только пояснение.
             if map_type != "grid":
-                story.append(Spacer(1, 0.2 * cm))
-                legend_style = ParagraphStyle(
-                    "color_legend", fontName=FONT, fontSize=9,
-                    alignment=TA_CENTER, spaceAfter=4, leading=14,
-                )
-                story.append(Paragraph(
-                    "<b>Цветовая шкала (доли ПДК):</b> " + _color_legend_html(),
-                    legend_style,
-                ))
-                note_style = ParagraphStyle(
-                    "map_note", fontName=FONT, fontSize=8,
-                    alignment=TA_LEFT, textColor=colors.HexColor("#475569"),
-                    leftIndent=4, rightIndent=4, spaceAfter=4, leading=11,
-                )
-                story.append(Paragraph(
-                    "<i>Примечание: цветная заливка отображает все области, где "
-                    "приземная концентрация выше <b>0,01 ПДК</b>. Отдельные мелкие "
-                    "пятна вне основного облака соответствуют локальным пикам "
-                    "концентрации у изолированных источников выбросов "
-                    "(на расстоянии Xm от каждой трубы). Жирная красная линия — "
-                    "граница превышения ПДК (1,0 ПДК).</i>",
-                    note_style,
-                ))
+                try:
+                    story.append(Spacer(1, 0.2 * cm))
+                    story.append(Paragraph(
+                        "<b>Цветовая шкала (доли ПДК):</b><br/>" + _color_legend_html(),
+                        legend_style,
+                    ))
+                    story.append(Paragraph(
+                        "<i>Примечание: цветная заливка отображает все области, где "
+                        "приземная концентрация выше <b>0,01 ПДК</b>. Отдельные мелкие "
+                        "пятна вне основного облака соответствуют локальным пикам "
+                        "концентрации у изолированных источников выбросов "
+                        "(на расстоянии Xm от каждой трубы). Жирная красная линия — "
+                        "граница превышения ПДК (1,0 ПДК).</i>",
+                        note_style,
+                    ))
+                except Exception as e:
+                    print(f"[pdf_export] Легенда/примечание #{sub_idx} не построены: {e}")
         except Exception as e:
             traceback_text = ""
             try:
