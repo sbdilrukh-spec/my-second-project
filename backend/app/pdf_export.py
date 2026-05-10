@@ -426,6 +426,37 @@ def _make_polar_plot(points_data: list, sources: list = None,
     return buf
 
 
+# Соответствие уровней ПДК и цветов заливки.
+# Дублирует палитру из _make_transparent_dispersion_map.
+_PDK_COLOR_MAP = [
+    ("0,01 ПДК", "#DBEAFE"),
+    ("0,05 ПДК", "#93C5FD"),
+    ("0,1 ПДК",  "#3B82F6"),
+    ("0,2 ПДК",  "#14B8A6"),
+    ("0,3 ПДК",  "#22C55E"),
+    ("0,5 ПДК",  "#A3E635"),
+    ("0,6 ПДК",  "#FACC15"),
+    ("0,8 ПДК",  "#F97316"),
+    ("1,0 ПДК",  "#DC2626"),
+    ("2,0 ПДК",  "#991B1B"),
+    ("5,0+ ПДК", "#581C87"),
+]
+
+
+def _color_legend_html() -> str:
+    """HTML для ReportLab Paragraph: цветные плашки с подписями уровней."""
+    parts = []
+    for label, color in _PDK_COLOR_MAP:
+        # Белый текст на тёмных оттенках, чёрный — на светлых
+        text_color = "#fff" if color in ("#3B82F6", "#14B8A6", "#22C55E",
+                                          "#DC2626", "#991B1B", "#581C87") else "#111"
+        parts.append(
+            f'<font backColor="{color}" color="{text_color}">'
+            f'&nbsp;{label}&nbsp;</font>'
+        )
+    return " ".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Прозрачная карта рассеивания — для наложения в CorelDraw на свою подложку
 # ---------------------------------------------------------------------------
@@ -515,17 +546,29 @@ def _make_transparent_dispersion_map(
     fig, ax = plt.subplots(figsize=(fig_w, fig_h), facecolor=fig_face)
     ax.set_facecolor(ax_face)
 
-    # Заливка между изолиниями (полупрозрачная розово-красная палитра)
-    fill_colors = [
-        "#FFE4E1", "#FFCCCC", "#FF9999", "#FF7777",
-        "#F87171", "#EF4444", "#DC2626", "#B91C1C",
-        "#991B1B", "#7F1D1D",
+    # Радужная палитра — каждому уровню ПДК свой явно различимый цвет.
+    # Идёт от холодного (низкие концентрации) к горячему (превышение).
+    # Соответствие "уровень → цвет" дублируется в _color_legend_html ниже.
+    fill_colors_full = [
+        "#DBEAFE",  # 0,01 ПДК — бледно-голубой
+        "#93C5FD",  # 0,05 ПДК — светло-голубой
+        "#3B82F6",  # 0,1  ПДК — синий
+        "#14B8A6",  # 0,2  ПДК — бирюзовый
+        "#22C55E",  # 0,3  ПДК — зелёный
+        "#A3E635",  # 0,5  ПДК — лайм
+        "#FACC15",  # 0,6  ПДК — жёлтый
+        "#F97316",  # 0,8  ПДК — оранжевый
+        "#DC2626",  # 1,0  ПДК — красный
+        "#991B1B",  # 2,0  ПДК — тёмно-красный
+        "#581C87",  # 5,0+ ПДК — тёмно-фиолетовый
     ]
+    # iso_levels уже отфильтрован под фактический диапазон концентраций.
+    # Берём столько цветов, сколько реально интервалов в fill_levels.
     fill_levels = [0.0] + list(iso_levels)
     cf = ax.contourf(
         XI, YI, Z_pdk, levels=fill_levels,
-        colors=fill_colors[:len(fill_levels) - 1],
-        alpha=0.45, extend="max",
+        colors=fill_colors_full[:len(fill_levels) - 1],
+        alpha=0.55, extend="max",
     )
 
     # Все линии изолиний — без подписей (тонкие, для густоты картинки)
@@ -965,6 +1008,33 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
             png_buf.seek(0)
             map_img = RLImage(png_buf, width=disp_w, height=disp_h)
             story.append(map_img)
+
+            # Цветовая легенда + примечание (только для типа "isolines",
+            # для "grid" они не нужны — там значения прямо в ячейках).
+            if map_type != "grid":
+                story.append(Spacer(1, 0.2 * cm))
+                legend_style = ParagraphStyle(
+                    "color_legend", fontName=FONT, fontSize=9,
+                    alignment=TA_CENTER, spaceAfter=4, leading=14,
+                )
+                story.append(Paragraph(
+                    "<b>Цветовая шкала (доли ПДК):</b> " + _color_legend_html(),
+                    legend_style,
+                ))
+                note_style = ParagraphStyle(
+                    "map_note", fontName=FONT, fontSize=8,
+                    alignment=TA_LEFT, textColor=colors.HexColor("#475569"),
+                    leftIndent=4, rightIndent=4, spaceAfter=4, leading=11,
+                )
+                story.append(Paragraph(
+                    "<i>Примечание: цветная заливка отображает все области, где "
+                    "приземная концентрация выше <b>0,01 ПДК</b>. Отдельные мелкие "
+                    "пятна вне основного облака соответствуют локальным пикам "
+                    "концентрации у изолированных источников выбросов "
+                    "(на расстоянии Xm от каждой трубы). Жирная красная линия — "
+                    "граница превышения ПДК (1,0 ПДК).</i>",
+                    note_style,
+                ))
         except Exception as e:
             traceback_text = ""
             try:
