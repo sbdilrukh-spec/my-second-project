@@ -426,21 +426,23 @@ def _make_polar_plot(points_data: list, sources: list = None,
     return buf
 
 
-# Соответствие уровней ПДК и цветов заливки.
-# Дублирует палитру из _make_transparent_dispersion_map.
-_PDK_COLOR_MAP = [
-    ("0,01 ПДК", "#DBEAFE"),
-    ("0,05 ПДК", "#93C5FD"),
-    ("0,1 ПДК",  "#3B82F6"),
-    ("0,2 ПДК",  "#14B8A6"),
-    ("0,3 ПДК",  "#22C55E"),
-    ("0,5 ПДК",  "#A3E635"),
-    ("0,6 ПДК",  "#FACC15"),
-    ("0,8 ПДК",  "#F97316"),
-    ("1,0 ПДК",  "#DC2626"),
-    ("2,0 ПДК",  "#991B1B"),
-    ("5,0+ ПДК", "#581C87"),
+# Единственный источник правды по соответствию «уровень ПДК → цвет».
+# Используется и для contourf-заливки, и для легенды в PDF/PNG.
+_PDK_LEVELS = [
+    (0.01, "#DBEAFE", "0,01 ПДК"),
+    (0.05, "#93C5FD", "0,05 ПДК"),
+    (0.1,  "#3B82F6", "0,1 ПДК"),
+    (0.2,  "#14B8A6", "0,2 ПДК"),
+    (0.3,  "#22C55E", "0,3 ПДК"),
+    (0.5,  "#A3E635", "0,5 ПДК"),
+    (0.6,  "#FACC15", "0,6 ПДК"),
+    (0.8,  "#F97316", "0,8 ПДК"),
+    (1.0,  "#DC2626", "1,0 ПДК"),
+    (2.0,  "#991B1B", "2,0 ПДК"),
+    (5.0,  "#581C87", "5,0+ ПДК"),
 ]
+# Соответствие для текстовой легенды в PDF (label → color).
+_PDK_COLOR_MAP = [(label, color) for _, color, label in _PDK_LEVELS]
 
 
 def _color_legend_html(present_levels=None) -> str:
@@ -547,22 +549,9 @@ def _make_transparent_dispersion_map(
     fig, ax = plt.subplots(figsize=(fig_w, fig_h), facecolor=fig_face)
     ax.set_facecolor(ax_face)
 
-    # Радужная палитра — каждому уровню ПДК свой явно различимый цвет.
+    # Радужная палитра — единый источник правды _PDK_LEVELS на уровне модуля.
     # Идёт от холодного (низкие концентрации) к горячему (превышение).
-    # Соответствие "уровень → цвет" дублируется в _color_legend_html ниже.
-    fill_colors_full = [
-        "#DBEAFE",  # 0,01 ПДК — бледно-голубой
-        "#93C5FD",  # 0,05 ПДК — светло-голубой
-        "#3B82F6",  # 0,1  ПДК — синий
-        "#14B8A6",  # 0,2  ПДК — бирюзовый
-        "#22C55E",  # 0,3  ПДК — зелёный
-        "#A3E635",  # 0,5  ПДК — лайм
-        "#FACC15",  # 0,6  ПДК — жёлтый
-        "#F97316",  # 0,8  ПДК — оранжевый
-        "#DC2626",  # 1,0  ПДК — красный
-        "#991B1B",  # 2,0  ПДК — тёмно-красный
-        "#581C87",  # 5,0+ ПДК — тёмно-фиолетовый
-    ]
+    fill_colors_full = [color for _, color, _ in _PDK_LEVELS]
     # iso_levels уже отфильтрован под фактический диапазон концентраций.
     # Берём столько цветов, сколько реально интервалов в fill_levels.
     fill_levels = [0.0] + list(iso_levels)
@@ -682,6 +671,61 @@ def _make_transparent_dispersion_map(
                 ha="center", va="bottom", fontsize=11, fontweight="bold",
                 color="black", zorder=15,
             )
+
+        # ── Цветовая легенда — правый-нижний угол. Только для PNG.
+        # Показываем только те уровни, что фактически есть на карте (iso_levels).
+        if iso_levels:
+            present = []
+            for lv in iso_levels:
+                color = next((c for v, c, _ in _PDK_LEVELS if abs(v - lv) < 1e-6), None)
+                if color is None:
+                    continue
+                present.append((lv, color, f"{lv:g}"))
+
+            if present:
+                n = len(present)
+                # Размер ячейки — в долях ширины/высоты осей (transAxes).
+                cell_w = 0.038 if n <= 11 else 0.034
+                cell_h = 0.028
+                legend_w = cell_w * n
+                legend_x0 = 0.97 - legend_w  # правый край с небольшим отступом
+                legend_y0 = 0.06             # отступ от низа
+                # Белая подложка под всю легенду (с местом для подписей)
+                pad = 0.012
+                ax.add_patch(plt.Rectangle(
+                    (legend_x0 - pad, legend_y0 - 0.045),
+                    legend_w + 2 * pad, cell_h + 0.075,
+                    transform=ax.transAxes,
+                    facecolor="white", edgecolor="#333",
+                    linewidth=0.7, zorder=18,
+                ))
+                # Заголовок над цветами
+                ax.text(
+                    legend_x0 + legend_w / 2,
+                    legend_y0 + cell_h + 0.012,
+                    "Доли ПДК",
+                    transform=ax.transAxes,
+                    ha="center", va="bottom",
+                    fontsize=9, fontweight="bold", color="black", zorder=20,
+                )
+                # Цветные ячейки + числовые подписи под каждой
+                for i, (lv, color, txt) in enumerate(present):
+                    cx = legend_x0 + i * cell_w
+                    ax.add_patch(plt.Rectangle(
+                        (cx, legend_y0),
+                        cell_w * 0.95, cell_h,
+                        transform=ax.transAxes,
+                        facecolor=color, edgecolor="#333",
+                        linewidth=0.4, zorder=19,
+                    ))
+                    ax.text(
+                        cx + cell_w * 0.475,
+                        legend_y0 - 0.006,
+                        txt,
+                        transform=ax.transAxes,
+                        ha="center", va="top",
+                        fontsize=8, color="black", zorder=20,
+                    )
 
     ax.set_xlim(0, x_length)
     ax.set_ylim(0, y_length)
