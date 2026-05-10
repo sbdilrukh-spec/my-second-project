@@ -718,9 +718,17 @@ def export_map_png(req: CalculationRequest):
         with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for idx, sub in enumerate(by_substance_data):
                 if isinstance(sub, dict):
+                    # Поддерживаем две формы: name/code на верхнем уровне sub
+                    # (precomputed_result от фронта) и внутри sub["substance"]
+                    # (recomputed на бэке — структура из compute_per_substance).
                     sub_meta = sub.get("substance") or {}
-                    sub_name = sub_meta.get("name") if isinstance(sub_meta, dict) else None
-                    sub_name = sub_name or sub.get("code") or f"вещество-{idx+1}"
+                    nested_name = sub_meta.get("name") if isinstance(sub_meta, dict) else None
+                    sub_name = (
+                        nested_name
+                        or sub.get("name")
+                        or sub.get("code")
+                        or f"вещество-{idx+1}"
+                    )
                     sub_pdk = sub.get("pdk") or 0.5
                     sub_points = sub.get("points") or []
                 else:
