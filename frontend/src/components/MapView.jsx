@@ -75,7 +75,7 @@ function CanvasHeatmap({ points, maxC }) {
 }
 
 // ─── Grid Overlay (ОНД-86 стиль) ─────────────────────────────────────────────
-function GridOverlay({ points, maxC, gridStep, originLat, originLon, xLength, yLength, sourceOffsetX, sourceOffsetY }) {
+function GridOverlay({ points, maxC, gridStep, originLat, originLon, xLength, yLength, sourceOffsetX, sourceOffsetY, pdk }) {
   const map = useMap();
 
   useEffect(() => {
@@ -147,8 +147,14 @@ function GridOverlay({ points, maxC, gridStep, originLat, originLon, xLength, yL
         ctx.lineWidth = 0.5;
         ctx.strokeRect(px.x - half, px.y - half, cellPx, cellPx);
 
-        // Значение в ячейке
+        // Значение в ячейке — в долях ПДК, чтобы единицы совпадали с PDF и легендой
         if (showText && p.c > 0) {
+          const pdk_val = (pdk && pdk > 0) ? pdk : 0.5;
+          const pdkRatio = p.c / pdk_val;
+          // Формат: 0.0124 для маленьких, 1.23 для крупных — компактно
+          const txt = pdkRatio >= 10 ? pdkRatio.toFixed(1)
+                      : pdkRatio >= 1 ? pdkRatio.toFixed(2)
+                      : pdkRatio.toFixed(4);
           ctx.font = `${isMax ? "bold " : ""}${fontSize}px monospace`;
           ctx.textAlign = "center";
           ctx.textBaseline = "middle";
@@ -156,12 +162,12 @@ function GridOverlay({ points, maxC, gridStep, originLat, originLon, xLength, yL
             // Белый текст с чёрной обводкой — читается на красном фоне
             ctx.lineWidth = 3;
             ctx.strokeStyle = "#000";
-            ctx.strokeText(p.c.toFixed(4), px.x, px.y);
+            ctx.strokeText(txt, px.x, px.y);
             ctx.fillStyle = "#fff";
-            ctx.fillText(p.c.toFixed(4), px.x, px.y);
+            ctx.fillText(txt, px.x, px.y);
           } else {
             ctx.fillStyle = ratio > 0.6 ? "#7C2D12" : "#111111";
-            ctx.fillText(p.c.toFixed(4), px.x, px.y);
+            ctx.fillText(txt, px.x, px.y);
           }
         }
 
@@ -254,7 +260,7 @@ function GridOverlay({ points, maxC, gridStep, originLat, originLon, xLength, yL
       map.off("zoom zoomend moveend viewreset", draw);
       if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
     };
-  }, [points, maxC, gridStep, originLat, originLon, xLength, yLength, sourceOffsetX, sourceOffsetY, map]);
+  }, [points, maxC, gridStep, originLat, originLon, xLength, yLength, sourceOffsetX, sourceOffsetY, pdk, map]);
 
   return null;
 }
@@ -771,6 +777,7 @@ export default function MapView({
           yLength={gridYLength || 7000}
           sourceOffsetX={sourceOffsetX || 3500}
           sourceOffsetY={sourceOffsetY || 3500}
+          pdk={result.pdk || currentPdk || 0.5}
         />
       )}
 

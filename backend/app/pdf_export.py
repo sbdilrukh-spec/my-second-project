@@ -109,15 +109,28 @@ def _make_concentration_plot(points_data: list, grid_step: float = 500,
                               title: str = "Карта рассеивания ЗВ в приземном слое",
                               grid_params: dict = None,
                               sources: list = None,
-                              boundary: list = None) -> io.BytesIO:
+                              boundary: list = None,
+                              pdk: float = None) -> io.BytesIO:
     """
     Сеточная карта рассеивания в стиле ОНД-86:
     каждая ячейка содержит числовое значение концентрации.
     Начало координат (0,0) в нижнем левом углу.
+
+    Если передан pdk, значения в ячейках выводятся в долях ПДК
+    (c / ПДК), иначе — в исходных единицах (мг/м³).
     """
     lats = np.array([p["lat"] for p in points_data])
     lons = np.array([p["lon"] for p in points_data])
-    conc = np.array([p["c"] for p in points_data])
+    conc_raw = np.array([p["c"] for p in points_data])
+    # Если задан ПДК — отображаем всё в долях ПДК. Цветовая шкала и
+    # подписи ячеек используют одно и то же значение, чтобы единицы
+    # совпадали с легендой и Таблицей 13.
+    if pdk and pdk > 0:
+        conc = conc_raw / pdk
+        units_label = "доли ПДК"
+    else:
+        conc = conc_raw
+        units_label = "мг/м³"
 
     # Начало координат — минимальные lat/lon (нижний левый угол)
     origin_lat = float(np.min(lats))
@@ -182,8 +195,16 @@ def _make_concentration_plot(points_data: list, grid_step: float = 500,
             ax.add_patch(rect)
 
             if c_val > 0:
+                # Адаптивный формат для долей ПДК: для крупных чисел меньше
+                # знаков после запятой, иначе 4 знака для тонкой детализации.
+                if c_val >= 10:
+                    txt = f"{c_val:.1f}"
+                elif c_val >= 1:
+                    txt = f"{c_val:.2f}"
+                else:
+                    txt = f"{c_val:.4f}"
                 ax.text(
-                    x_val, y_val, f"{c_val:.2f}",
+                    x_val, y_val, txt,
                     ha="center", va="center", fontsize=font_size,
                     fontweight="bold" if is_max else "normal",
                     color="#CC0000" if is_max else "#000000",
@@ -233,6 +254,13 @@ def _make_concentration_plot(points_data: list, grid_step: float = 500,
                 fontsize=font_size + 1, color="#fff", fontweight="bold", zorder=7)
 
     ax.set_title(title, fontsize=11, fontweight="bold")
+    # Маленькая поясняющая надпись, в каких единицах значения в ячейках
+    ax.text(
+        0.5, -0.06,
+        f"Значения в ячейках: {units_label}",
+        transform=ax.transAxes, ha="center", va="top",
+        fontsize=9, color="#475569", style="italic",
+    )
 
     # Жёлтые метки осей (координаты от начала: 0, 500, 1000, ...)
     ax.set_xticks(unique_x)
@@ -1218,8 +1246,8 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
                 # _make_concentration_plot ожидает grid_step из grid_data.
                 grid_step = grid_data.get("step", 500) if grid_data else 500
                 title_text = (
-                    f"Карта рассеивания: {sub_name}" if show_title
-                    else "Карта рассеивания ЗВ в приземном слое"
+                    f"Карта приземных концентраций {sub_name}, доли ПДК" if show_title
+                    else "Карта рассеивания, доли ПДК"
                 )
                 png_buf = _make_concentration_plot(
                     sub_points,
@@ -1228,6 +1256,7 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
                     grid_params=grid_data,
                     sources=None,        # источники в карте отключены
                     boundary=boundary,
+                    pdk=sub_pdk,         # значения в ячейках — в долях ПДК
                 )
             else:
                 png_buf = _make_transparent_dispersion_map(
