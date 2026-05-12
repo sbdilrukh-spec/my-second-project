@@ -161,11 +161,21 @@ def parse_excel(file_bytes: bytes) -> List[Dict[str, Any]]:
                     source[header] = None
                     continue
                 try:
-                    source[header] = float(val)
-                    any_numeric_parsed = True
+                    # Excel в русской локали иногда хранит числа как строки
+                    # с запятой "0,000000205". Заменяем запятую на точку и
+                    # удаляем неразрывные пробелы (тысячный разделитель).
+                    if isinstance(val, str):
+                        cleaned = val.strip().replace("\xa0", "").replace(" ", "")
+                        cleaned = cleaned.replace(",", ".")
+                        source[header] = float(cleaned) if cleaned else None
+                        if source[header] is not None:
+                            any_numeric_parsed = True
+                    else:
+                        source[header] = float(val)
+                        any_numeric_parsed = True
                 except (ValueError, TypeError):
                     source[header] = None
-                    errors.append(f"Строка {row_idx}, '{headers[i]}': нечисловое значение")
+                    errors.append(f"Строка {row_idx}, '{headers[i]}': нечисловое значение «{val}»")
 
         # Пустая или служебная строка — тихо пропускаем
         if not any_numeric_parsed:
