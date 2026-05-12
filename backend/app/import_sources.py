@@ -77,6 +77,14 @@ def parse_csv(content: str) -> List[Dict[str, Any]]:
 
         source = {}
         errors = []
+        # Числовые поля, по которым мы можем понять, есть ли в строке хоть
+        # что-то полезное. Если ни одно из них не распарсилось — строка
+        # пустая / служебная (например, «Итого» / комментарий) — пропускаем.
+        NUMERIC_FIELDS = (
+            "height", "diameter", "velocity", "temperature",
+            "emission_gs", "emission_ty", "lat", "lon",
+        )
+        any_numeric_parsed = False
 
         for i, header in enumerate(headers):
             val = row[i].strip() if i < len(row) else ""
@@ -85,13 +93,22 @@ def parse_csv(content: str) -> List[Dict[str, Any]]:
                 source[header] = val or f"Источник {row_idx - 1}"
             elif header in ("substance_code", "substance_name"):
                 source[header] = val or None
-            elif header in ("height", "diameter", "velocity", "temperature",
-                           "emission_gs", "emission_ty", "lat", "lon"):
+            elif header in NUMERIC_FIELDS:
+                if not val:
+                    source[header] = None
+                    continue
                 try:
-                    source[header] = float(val.replace(",", ".")) if val else None
+                    source[header] = float(val.replace(",", "."))
+                    any_numeric_parsed = True
                 except ValueError:
                     source[header] = None
                     errors.append(f"Строка {row_idx}, '{headers[i]}': нечисловое значение '{val}'")
+
+        # Если в строке вообще нет числовых данных — это пустая/служебная
+        # строка (хвост Excel, "Итого", комментарий). Тихо пропускаем,
+        # ошибки не накапливаем.
+        if not any_numeric_parsed:
+            continue
 
         # Проверка обязательных полей
         for field in REQUIRED_FIELDS:
@@ -122,9 +139,15 @@ def parse_excel(file_bytes: bytes) -> List[Dict[str, Any]]:
     headers = [_normalize_header(str(h or "")) for h in rows[0]]
     sources = []
 
+    NUMERIC_FIELDS = (
+        "height", "diameter", "velocity", "temperature",
+        "emission_gs", "emission_ty", "lat", "lon",
+    )
+
     for row_idx, row in enumerate(rows[1:], start=2):
         source = {}
         errors = []
+        any_numeric_parsed = False
 
         for i, header in enumerate(headers):
             val = row[i] if i < len(row) else None
@@ -133,13 +156,20 @@ def parse_excel(file_bytes: bytes) -> List[Dict[str, Any]]:
                 source[header] = str(val) if val else f"Источник {row_idx - 1}"
             elif header in ("substance_code", "substance_name"):
                 source[header] = str(val) if val else None
-            elif header in ("height", "diameter", "velocity", "temperature",
-                           "emission_gs", "emission_ty", "lat", "lon"):
+            elif header in NUMERIC_FIELDS:
+                if val is None or val == "":
+                    source[header] = None
+                    continue
                 try:
-                    source[header] = float(val) if val is not None else None
+                    source[header] = float(val)
+                    any_numeric_parsed = True
                 except (ValueError, TypeError):
                     source[header] = None
                     errors.append(f"Строка {row_idx}, '{headers[i]}': нечисловое значение")
+
+        # Пустая или служебная строка — тихо пропускаем
+        if not any_numeric_parsed:
+            continue
 
         for field in REQUIRED_FIELDS:
             if field not in source or source[field] is None:
