@@ -56,7 +56,12 @@ def _normalize_header(header: str) -> str:
 
 
 def parse_csv(content: str) -> List[Dict[str, Any]]:
-    """Парсит CSV-текст и возвращает список источников."""
+    """Парсит CSV-текст и возвращает список источников.
+
+    Поддерживает «протяжку» параметров трубы из строки выше:
+    если у текущей строки заполнены только Код/выбросы, а параметры трубы
+    пусты — они наследуются от предыдущей валидной строки того же источника.
+    """
     # Определяем разделитель
     delimiter = ";"
     if content.count(",") > content.count(";"):
@@ -71,26 +76,28 @@ def parse_csv(content: str) -> List[Dict[str, Any]]:
     headers = [_normalize_header(h) for h in rows[0]]
     sources = []
 
+    NUMERIC_FIELDS = (
+        "height", "diameter", "velocity", "temperature",
+        "emission_gs", "emission_ty", "lat", "lon",
+    )
+    INHERITABLE_FIELDS = ("name", "height", "diameter", "velocity",
+                          "temperature", "lat", "lon")
+
+    last_inheritable: Dict[str, Any] = {}
+
     for row_idx, row in enumerate(rows[1:], start=2):
         if len(row) < len(headers):
             row += [""] * (len(headers) - len(row))
 
         source = {}
         errors = []
-        # Числовые поля, по которым мы можем понять, есть ли в строке хоть
-        # что-то полезное. Если ни одно из них не распарсилось — строка
-        # пустая / служебная (например, «Итого» / комментарий) — пропускаем.
-        NUMERIC_FIELDS = (
-            "height", "diameter", "velocity", "temperature",
-            "emission_gs", "emission_ty", "lat", "lon",
-        )
         any_numeric_parsed = False
 
         for i, header in enumerate(headers):
             val = row[i].strip() if i < len(row) else ""
 
-            if header in ("name",):
-                source[header] = val or f"Источник {row_idx - 1}"
+            if header == "name":
+                source[header] = val or None
             elif header in ("substance_code", "substance_name"):
                 source[header] = val or None
             elif header in NUMERIC_FIELDS:
@@ -104,11 +111,29 @@ def parse_csv(content: str) -> List[Dict[str, Any]]:
                     source[header] = None
                     errors.append(f"Строка {row_idx}, '{headers[i]}': нечисловое значение '{val}'")
 
-        # Если в строке вообще нет числовых данных — это пустая/служебная
-        # строка (хвост Excel, "Итого", комментарий). Тихо пропускаем,
-        # ошибки не накапливаем.
-        if not any_numeric_parsed:
+        # Наследуем параметры трубы из строки выше
+        for f in INHERITABLE_FIELDS:
+            if (source.get(f) is None) and last_inheritable.get(f) is not None:
+                source[f] = last_inheritable[f]
+
+        has_emission = (
+            source.get("emission_gs") is not None
+            or source.get("emission_ty") is not None
+        )
+
+        # Если в строке вообще нет числовых данных и нет выбросов —
+        # это пустая/служебная строка (хвост, «Итого», комментарий).
+        if not any_numeric_parsed and not has_emission:
             continue
+
+        # Обновляем «последние известные» параметры трубы
+        for f in INHERITABLE_FIELDS:
+            if source.get(f) is not None:
+                last_inheritable[f] = source[f]
+
+        if not source.get("name"):
+            source["name"] = last_inheritable.get("name") or f"Источник {row_idx - 1}"
+            last_inheritable["name"] = source["name"]
 
         # Проверка обязательных полей
         for field in REQUIRED_FIELDS:
@@ -126,7 +151,14 @@ def parse_csv(content: str) -> List[Dict[str, Any]]:
 
 
 def parse_excel(file_bytes: bytes) -> List[Dict[str, Any]]:
-    """Парсит Excel (.xlsx) файл и возвращает список источников."""
+    """Парсит Excel (.xlsx) файл и возвращает список источников.
+
+    Поддерживает «карточный» вид с merge_cells по параметрам трубы:
+    в строках, относящихся к дополнительным веществам того же источника,
+    значения параметров трубы — None (Excel хранит merge так, что значение
+    видно только в top-left ячейке). Такие пропуски наследуются от
+    предыдущей валидной строки того же источника.
+    """
     import openpyxl
 
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True)
@@ -143,6 +175,12 @@ def parse_excel(file_bytes: bytes) -> List[Dict[str, Any]]:
         "height", "diameter", "velocity", "temperature",
         "emission_gs", "emission_ty", "lat", "lon",
     )
+    # Параметры трубы — это поля, которые могут быть объединены merge_cells
+    # по нескольким веществам одного источника. Их «протягиваем» из строки выше.
+    INHERITABLE_FIELDS = ("name", "height", "diameter", "velocity",
+                          "temperature", "lat", "lon")
+
+    last_inheritable: Dict[str, Any] = {}
 
     for row_idx, row in enumerate(rows[1:], start=2):
         source = {}
@@ -152,10 +190,10 @@ def parse_excel(file_bytes: bytes) -> List[Dict[str, Any]]:
         for i, header in enumerate(headers):
             val = row[i] if i < len(row) else None
 
-            if header in ("name",):
-                source[header] = str(val) if val else f"Источник {row_idx - 1}"
+            if header == "name":
+                source[header] = str(val).strip() if val else None
             elif header in ("substance_code", "substance_name"):
-                source[header] = str(val) if val else None
+                source[header] = str(val).strip() if val else None
             elif header in NUMERIC_FIELDS:
                 if val is None or val == "":
                     source[header] = None
@@ -177,9 +215,33 @@ def parse_excel(file_bytes: bytes) -> List[Dict[str, Any]]:
                     source[header] = None
                     errors.append(f"Строка {row_idx}, '{headers[i]}': нечисловое значение «{val}»")
 
-        # Пустая или служебная строка — тихо пропускаем
-        if not any_numeric_parsed:
+        # Наследуем параметры трубы из строки выше, если пусто
+        for f in INHERITABLE_FIELDS:
+            if (source.get(f) is None) and last_inheritable.get(f) is not None:
+                source[f] = last_inheritable[f]
+
+        # Признак «строка содержит данные о выбросе» — хотя бы один из г/с / т/год
+        has_emission = (
+            source.get("emission_gs") is not None
+            or source.get("emission_ty") is not None
+        )
+
+        # Пустая или служебная строка — тихо пропускаем.
+        # Считаем строку служебной, если:
+        #   - вообще нет числовых данных,
+        #   - И нет выбросов, унаследованных параметров недостаточно для источника.
+        if not any_numeric_parsed and not has_emission:
             continue
+
+        # Обновляем «последние известные» параметры трубы для следующих строк
+        for f in INHERITABLE_FIELDS:
+            if source.get(f) is not None:
+                last_inheritable[f] = source[f]
+
+        # Имя по умолчанию
+        if not source.get("name"):
+            source["name"] = last_inheritable.get("name") or f"Источник {row_idx - 1}"
+            last_inheritable["name"] = source["name"]
 
         for field in REQUIRED_FIELDS:
             if field not in source or source[field] is None:
@@ -213,7 +275,14 @@ def generate_template_csv() -> str:
 
 
 def generate_template_xlsx() -> bytes:
-    """Генерирует Excel-шаблон для импорта."""
+    """Генерирует Excel-шаблон для импорта.
+
+    Плоская таблица: одна строка = одно вещество от одного источника.
+    Параметры трубы (Название, H, D, w₀, Tг, Lat, Lon) визуально
+    объединены (merge) по нескольким строкам одного источника —
+    в каждой подстроке кода/выбросов параметры трубы повторяются
+    зрительно как «карточка».
+    """
     import openpyxl
     from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 
@@ -222,45 +291,126 @@ def generate_template_xlsx() -> bytes:
     ws.title = "Источники"
 
     headers = [
-        "№", "Код вещества", "Высота (H), м", "Диаметр (D), м",
+        "Название", "Код вещества", "Высота (H), м", "Диаметр (D), м",
         "Скорость (w0), м/с", "Температура (Tг), °C",
-        "Выброс (M), г/с", "Выброс, т/год",
+        "Выброс (M), г/с", "Выброс, т/год", "Широта", "Долгота",
     ]
+    # Индексы колонок, которые относятся к «параметрам трубы» (1-based).
+    # Их объединяем merge_cells по всем строкам одного источника.
+    SRC_PARAM_COLS = (1, 3, 4, 5, 6, 9, 10)
+    # Колонки «по веществу» (свои значения в каждой строке)
+    SUBSTANCE_COLS = (2, 7, 8)
 
     header_font = Font(bold=True, size=11, color="FFFFFF")
     header_fill = PatternFill(start_color="2563EB", end_color="2563EB", fill_type="solid")
-    thin_border = Border(
-        left=Side(style="thin"), right=Side(style="thin"),
-        top=Side(style="thin"), bottom=Side(style="thin"),
-    )
+    src_param_fill = PatternFill(start_color="EFF6FF", end_color="EFF6FF", fill_type="solid")
+    thin = Side(style="thin", color="CBD5E1")
+    thin_border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    centered = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
     for col, h in enumerate(headers, 1):
         cell = ws.cell(row=1, column=col, value=h)
         cell.font = header_font
         cell.fill = header_fill
-        cell.alignment = Alignment(horizontal="center", wrap_text=True)
+        cell.alignment = centered
         cell.border = thin_border
+    ws.row_dimensions[1].height = 36
 
-    # Демонстрируем многовеществный формат: одна труба, три вещества
-    examples = [
-        ["Труба ТЭЦ-1", "0301", 45, 1.2, 12.0, 180, 8.5, 268.06],
-        ["Труба ТЭЦ-1", "0337", 45, 1.2, 12.0, 180, 12.0, 378.43],
-        ["Труба ТЭЦ-1", "0330", 45, 1.2, 12.0, 180, 3.5, 110.4],
+    # Демо-данные: 3 источника с разным числом веществ
+    sources_demo = [
+        {
+            "name": "Труба ТЭЦ-1",
+            "height": 45, "diameter": 1.2, "velocity": 12.0,
+            "temperature": 180, "lat": 41.2995, "lon": 69.2401,
+            "emissions": [
+                ("0301", 8.5, 268.06),
+                ("0337", 12.0, 378.43),
+                ("0330", 3.5, 110.40),
+            ],
+        },
+        {
+            "name": "Труба котельной №2",
+            "height": 25, "diameter": 0.8, "velocity": 8.5,
+            "temperature": 140, "lat": 41.3010, "lon": 69.2480,
+            "emissions": [
+                ("0301", 2.1, 66.20),
+                ("2902", 0.8, 25.20),
+            ],
+        },
+        {
+            "name": "Вентшахта",
+            "height": 8, "diameter": 0.56, "velocity": 2.4,
+            "temperature": 28.5, "lat": 41.3045, "lon": 69.2510,
+            "emissions": [
+                ("0123", 0.053, 0.06869),
+                ("0143", 0.000018, 0.0000024),
+            ],
+        },
     ]
-    for row_offset, row_data in enumerate(examples):
-        for col, val in enumerate(row_data, 1):
-            cell = ws.cell(row=2 + row_offset, column=col, value=val)
+
+    row = 2
+    for src in sources_demo:
+        n = len(src["emissions"])
+        first_row = row
+        last_row = row + n - 1
+
+        # Записываем параметры трубы в первую строку «карточки»
+        src_param_values = {
+            1: src["name"],
+            3: src["height"],
+            4: src["diameter"],
+            5: src["velocity"],
+            6: src["temperature"],
+            9: src["lat"],
+            10: src["lon"],
+        }
+        for col, val in src_param_values.items():
+            cell = ws.cell(row=first_row, column=col, value=val)
+            cell.font = Font(size=10, color="1E293B")
+            cell.alignment = centered
+            cell.fill = src_param_fill
             cell.border = thin_border
-            cell.alignment = Alignment(horizontal="center")
+        # Объединяем колонки параметров трубы по всем строкам источника
+        if n > 1:
+            for col in SRC_PARAM_COLS:
+                ws.merge_cells(start_row=first_row, start_column=col,
+                                end_row=last_row, end_column=col)
+                # Прокрашиваем объединённую область (для merge цвет нужен у top-left)
+                for r in range(first_row, last_row + 1):
+                    ws.cell(row=r, column=col).fill = src_param_fill
+                    ws.cell(row=r, column=col).border = thin_border
 
-    # Подсказка под таблицей
-    note = ws.cell(row=2 + len(examples) + 1, column=1,
-                    value="Многовеществный формат: повторите строку с одним и тем же 'Названием' источника, меняя только код вещества и выбросы.")
-    note.font = Font(italic=True, size=10, color="555555")
-    ws.merge_cells(start_row=note.row, start_column=1, end_row=note.row, end_column=len(headers))
+        # Строки веществ
+        for i, (code, gs, ty) in enumerate(src["emissions"]):
+            r = first_row + i
+            for col, val in ((2, code), (7, gs), (8, ty)):
+                cell = ws.cell(row=r, column=col, value=val)
+                cell.font = Font(size=10, color="1E293B")
+                cell.alignment = centered
+                cell.border = thin_border
+            ws.row_dimensions[r].height = 20
 
-    for col in range(1, len(headers) + 1):
-        ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = 18
+        row = last_row + 1
+
+    # Подсказка снизу
+    note = ws.cell(row=row + 1, column=1, value=(
+        "Каждое вещество — отдельная строка. У одного источника параметры "
+        "трубы (Название, H, D, w0, Tг, Широта, Долгота) визуально объединены: "
+        "при добавлении строк просто повторяйте «Название» или оставляйте "
+        "объединение — парсер унаследует параметры из строки выше."
+    ))
+    note.font = Font(italic=True, size=10, color="64748B")
+    note.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    ws.merge_cells(start_row=row + 1, start_column=1, end_row=row + 1, end_column=len(headers))
+    ws.row_dimensions[row + 1].height = 36
+
+    # Ширины колонок
+    col_widths = [22, 14, 14, 14, 16, 18, 16, 16, 12, 12]
+    for col, w in enumerate(col_widths, 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = w
+
+    ws.freeze_panes = "A2"
 
     buf = io.BytesIO()
     wb.save(buf)

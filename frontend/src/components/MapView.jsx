@@ -548,6 +548,21 @@ function MapTitle({ enterprise, substance, gridXLength, gridYLength }) {
   );
 }
 
+// Аппроксимация круга полигоном — возвращает массив [lat, lon]
+function circleLatLngs(centerLat, centerLon, radius, segments = 36) {
+  const pts = [];
+  const latRad = (centerLat || 0) * Math.PI / 180;
+  for (let i = 0; i < segments; i++) {
+    const angle = (i / segments) * Math.PI * 2;
+    const dx = Math.cos(angle) * radius;
+    const dy = Math.sin(angle) * radius;
+    const lat = (centerLat || 0) + (dy / 111000);
+    const lon = (centerLon || 0) + (dx / (111000 * Math.cos(latRad)));
+    pts.push([lat, lon]);
+  }
+  return pts;
+}
+
 // ─── Кнопки переключения режима ───────────────────────────────────────────────
 function ViewToggle({ mode, onChange }) {
   const btnBase = {
@@ -736,28 +751,45 @@ export default function MapView({
         </Polygon>
       )}
 
-      {/* Маркеры источников */}
+      {/* Источники: точечные и площадные */}
       {sources.map((src, i) => (
-        <Marker
-          key={i}
-          position={[src.lat || 41.3, src.lon || 69.24]}
-          draggable
-          eventHandlers={{ dragend(e) { const ll = e.target.getLatLng(); onSourceMove(i, ll.lat, ll.lng); } }}
-          icon={L.divIcon({
-            html: `<div style="background:#7C2D12;color:#fff;border-radius:50%;
-              width:24px;height:24px;display:flex;align-items:center;justify-content:center;
-              font-size:12px;font-weight:bold;border:2px solid #fff;
-              box-shadow:0 2px 6px rgba(0,0,0,0.5);font-family:sans-serif;">${i + 1}</div>`,
-            className: "",
-            iconAnchor: [12, 12],
-          })}
-        >
-          <Popup>
-            <b>{src.name}</b><br />
-            H={src.height}м D={src.diameter}м<br />
-            w₀={src.velocity}м/с T={src.temperature}°C
-          </Popup>
-        </Marker>
+        src.type === "area" ? (
+          <Polygon
+            key={"area-" + i}
+            positions={circleLatLngs(src.lat || 41.3, src.lon || 69.24, src.area_radius_m || 100)}
+            pathOptions={{
+              color: "#7C2D12",
+              weight: 2,
+              fillColor: "#7C2D12",
+              fillOpacity: 0.18,
+            }}
+          >
+            <Popup>
+              <b>{src.name}</b><br />Площадной источник<br />Радиус: {src.area_radius_m || 0} м
+            </Popup>
+          </Polygon>
+        ) : (
+          <Marker
+            key={i}
+            position={[src.lat || 41.3, src.lon || 69.24]}
+            draggable
+            eventHandlers={{ dragend(e) { const ll = e.target.getLatLng(); onSourceMove(i, ll.lat, ll.lng); } }}
+            icon={L.divIcon({
+              html: `<div style="background:#7C2D12;color:#fff;border-radius:50%;
+                width:24px;height:24px;display:flex;align-items:center;justify-content:center;
+                font-size:12px;font-weight:bold;border:2px solid #fff;
+                box-shadow:0 2px 6px rgba(0,0,0,0.5);font-family:sans-serif;">${i + 1}</div>`,
+              className: "",
+              iconAnchor: [12, 12],
+            })}
+          >
+            <Popup>
+              <b>{src.name}</b><br />
+              H={src.height}м D={src.diameter}м<br />
+              w₀={src.velocity}м/с T={src.temperature}°C
+            </Popup>
+          </Marker>
+        )
       ))}
 
       {/* Heatmap */}

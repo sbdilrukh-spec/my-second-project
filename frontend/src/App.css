@@ -44,6 +44,11 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  transition: width 0.2s ease, min-width 0.2s ease;
+}
+.sidebar.sidebar-wide {
+  width: 560px;
+  min-width: 560px;
 }
 
 .sidebar-header {

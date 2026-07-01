@@ -20,6 +20,9 @@ const EMISSION_DEFAULT = {
 export function createDefaultSource(cityLat, cityLon, idx) {
   return {
     ...STACK_DEFAULTS,
+    type: "stack",
+    area_radius_m: 100,
+    area_subdivisions: 5,
     name: `Источник ${idx + 1}`,
     lat: cityLat ?? STACK_DEFAULTS.lat,
     lon: cityLon ?? STACK_DEFAULTS.lon,
@@ -32,13 +35,15 @@ export function createDefaultSource(cityLat, cityLon, idx) {
 export function migrateSource(s) {
   if (!s) return s;
   if (Array.isArray(s.emissions) && s.emissions.length > 0) return s;
+  // Ensure type field for backward compatibility
+  const type = s.type || "stack";
   const flat = {
     substance: s.substance || null,
     emission_gs: s.emission_gs ?? null,
     emission_ty: s.emission_ty ?? null,
     pdk: s.pdk ?? 0.5,
   };
-  return { ...s, emissions: [flat] };
+  return { ...s, emissions: [flat], type };
 }
 
 export default function SourceForm({
@@ -127,11 +132,39 @@ export default function SourceForm({
         </button>
       </div>
 
+      <div className="field-row">
+        <label>{t.sourceType || "Тип источника"}</label>
+        <select value={source.type || "stack"} onChange={(e) => onChange(index, "type", e.target.value)}>
+          <option value="stack">{t.typeStack || "Трубный источник"}</option>
+          <option value="area">{t.typeArea || "Площадной источник"}</option>
+        </select>
+      </div>
+
       {/* --- Параметры трубы --- */}
-      {stackField("height", t.height)}
-      {stackField("diameter", t.diameter)}
-      {stackField("velocity", t.velocity)}
-      {stackField("temperature", t.temperature)}
+      {source.type !== "area" && (
+        <>
+          {stackField("height", t.height)}
+          {stackField("diameter", t.diameter)}
+          {stackField("velocity", t.velocity)}
+          {stackField("temperature", t.temperature)}
+        </>
+      )}
+
+      {/* --- Поля для площадного источника --- */}
+      {source.type === "area" && (
+        <>
+          <div className="field-row">
+            <label>{t.areaRadius || "Радиус площади, м"}</label>
+            <input type="number" step="1" min="1" value={source.area_radius_m || 100}
+              onChange={(e) => onChange(index, "area_radius_m", parseFloat(e.target.value) || 100)} />
+          </div>
+          <div className="field-row">
+            <label>{t.areaSubdivisions || "Разбиение (NxN)"}</label>
+            <input type="number" step="1" min="1" max="20" value={source.area_subdivisions || 5}
+              onChange={(e) => onChange(index, "area_subdivisions", parseInt(e.target.value, 10) || 5)} />
+          </div>
+        </>
+      )}
 
       {/* --- Координаты --- */}
       <div className="field-row" style={{ marginTop: 6 }}>

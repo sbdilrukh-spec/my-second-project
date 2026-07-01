@@ -13,6 +13,7 @@ import ResultsPanel from "./components/ResultsPanel.jsx";
 import TableInput from "./components/TableInput.jsx";
 import SubstanceEditor from "./components/SubstanceEditor.jsx";
 import EnterpriseBoundaryEditor from "./components/EnterpriseBoundaryEditor.jsx";
+import AddSourceModal from "./components/AddSourceModal.jsx";
 
 const DEFAULT_METEO = {
   city: "Ташкент",
@@ -278,10 +279,25 @@ export default function App() {
     // Приоритет: центроид контура предприятия → центр города → дефолт
     const baseLat = enterpriseCentroid?.lat ?? city?.lat ?? 41.3;
     const baseLon = enterpriseCentroid?.lon ?? city?.lon ?? 69.24;
-    setSources((prev) => [
-      ...prev,
-      createDefaultSource(baseLat, baseLon, prev.length),
-    ]);
+    // Открываем модал выбора типа — базовые координаты сохраняются в стейте
+    setPendingNewSourceBase({ lat: baseLat, lon: baseLon });
+    setShowAddSourceModal(true);
+  };
+
+  const [showAddSourceModal, setShowAddSourceModal] = useState(false);
+  const [pendingNewSourceBase, setPendingNewSourceBase] = useState(null);
+
+  const handleConfirmAddSource = (type) => {
+    const base = pendingNewSourceBase || { lat: 41.3, lon: 69.24 };
+    const newSrc = createDefaultSource(base.lat, base.lon, sources.length || 0);
+    newSrc.type = type === "area" ? "area" : "stack";
+    if (newSrc.type === "area") {
+      newSrc.area_radius_m = newSrc.area_radius_m || 100;
+      newSrc.area_subdivisions = newSrc.area_subdivisions || 5;
+    }
+    setSources((prev) => [...prev, newSrc]);
+    setShowAddSourceModal(false);
+    setPendingNewSourceBase(null);
   };
 
   const handleRemoveSource = (index) => {
@@ -430,6 +446,24 @@ export default function App() {
     input.click();
   };
 
+  // Сброс проекта в исходное состояние
+  const handleResetProject = () => {
+    if (!window.confirm("Сбросить проект? Все источники, метеоданные, область и данные предприятия будут очищены. Это действие нельзя отменить.")) {
+      return;
+    }
+    setSources([createDefaultSource(41.2995, 69.2401, 0)]);
+    setMeteo(DEFAULT_METEO);
+    setGrid(DEFAULT_GRID);
+    setSelectedSubstance(null);
+    setEnterprise(DEFAULT_ENTERPRISE);
+    setResult(null);
+    setTables(null);
+    setBaselineResult(null);
+    setDisplaySubstanceCode(null);
+    setError(null);
+    localStorage.removeItem("ond86_autosave");
+  };
+
   // Генерация таблиц ПДВ/ОВОС
   const handleGenerateTables = async () => {
     setTablesLoading(true);
@@ -457,7 +491,27 @@ export default function App() {
       // Минимальный ПДК среди всех выбросов всех источников (для совместимости со старым API)
       const allPdks = sources.flatMap(s => (s.emissions || []).map(e => e.pdk ?? 0.5));
       const pdk = allPdks.length ? Math.min(...allPdks) : 0.5;
-      const payload = { sources, meteo, grid, pdk };
+      // Разворачиваем площадные источники в сетку точечных источников
+      const expandedSources = sources.flatMap((src) => {
+        if (src.type !== "area") return [src];
+        const radius = src.area_radius_m || 100;
+        const subdivisions = src.area_subdivisions || 5;
+        const n = Math.max(1, parseInt(subdivisions, 10) || 5);
+        const pts = [];
+        for (let ix = 0; ix < n; ix++) {
+          for (let iy = 0; iy < n; iy++) {
+            const dx = ((ix + 0.5) - n / 2) * (2 * radius / n);
+            const dy = ((iy + 0.5) - n / 2) * (2 * radius / n);
+            const lat = (src.lat || 0) + (dy / 111000);
+            const lon = (src.lon || 0) + (dx / (111000 * Math.cos(((src.lat || 0) * Math.PI) / 180)));
+            const newEmissions = (src.emissions || []).map((e) => ({ ...e, emission_gs: (e.emission_gs || 0) / (n * n) }));
+            pts.push({ ...src, lat, lon, emissions: newEmissions });
+          }
+        }
+        return pts;
+      });
+
+      const payload = { sources: expandedSources, meteo, grid, pdk };
       const res = await calculate(payload);
       // Замораживаем в результате вещество главного (худшего) расчёта.
       // by_substance теперь содержит результаты по всем веществам отдельно.
@@ -897,13 +951,16 @@ export default function App() {
             </button>
           </div>
 
-          {/* ---- Сохранение / загрузка проекта ---- */}
+          {/* ---- Сохранение / загрузка / сброс проекта ---- */}
           <div className="panel-section" style={{ display: "flex", gap: 6 }}>
             <button className="btn-secondary btn-sm" style={{ flex: 1 }} onClick={handleSaveProject}>
               {t.saveProject}
             </button>
             <button className="btn-secondary btn-sm" style={{ flex: 1 }} onClick={handleLoadProject}>
               {t.loadProject}
+            </button>
+            <button className="btn-secondary btn-sm" style={{ flex: 1 }} onClick={handleResetProject}>
+              {t.resetProject || "Сбросить проект"}
             </button>
           </div>
 
@@ -1055,6 +1112,12 @@ export default function App() {
           t={t}
         />
       )}
+      <AddSourceModal
+        visible={showAddSourceModal}
+        onClose={() => setShowAddSourceModal(false)}
+        onConfirm={handleConfirmAddSource}
+        t={t}
+      />
     </div>
   );
 }
