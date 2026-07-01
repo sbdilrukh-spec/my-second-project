@@ -32,6 +32,16 @@ const DEFAULT_GRID = {
   source_offset_y: 3500,
 };
 
+// Приводит источники к формату бэкенда: фронтенд хранит тип в поле `type`,
+// а модель SourceInput ожидает `source_type`. Площадные источники бэкенд
+// сам разворачивает в сетку точечных подысточников (ОНД-86).
+function toBackendSources(sources) {
+  return sources.map((src) => ({
+    ...src,
+    source_type: src.type === "area" ? "area" : "stack",
+  }));
+}
+
 // Миграция старых проектов (radius -> x_length/y_length) + защита от некорректных значений
 function migrateGrid(g) {
   if (!g) return DEFAULT_GRID;
@@ -292,8 +302,12 @@ export default function App() {
     const newSrc = createDefaultSource(base.lat, base.lon, sources.length || 0);
     newSrc.type = type === "area" ? "area" : "stack";
     if (newSrc.type === "area") {
-      newSrc.area_radius_m = newSrc.area_radius_m || 100;
+      newSrc.area_length = newSrc.area_length || 200;
+      newSrc.area_width = newSrc.area_width || 100;
+      newSrc.area_angle = newSrc.area_angle ?? 0;
       newSrc.area_subdivisions = newSrc.area_subdivisions || 5;
+      // Для площадных (низкие/неорганизованные) — умеренная высота, холодный выброс
+      newSrc.height = newSrc.height ?? 5;
     }
     setSources((prev) => [...prev, newSrc]);
     setShowAddSourceModal(false);
@@ -470,7 +484,7 @@ export default function App() {
     try {
       const pdk = Math.min(...sources.map(s => s.pdk ?? 0.5));
       const payload = {
-        sources, meteo, grid, pdk,
+        sources: toBackendSources(sources), meteo, grid, pdk,
         substance: sources[0]?.substance || selectedSubstance,
         enterprise,
       };
@@ -491,27 +505,9 @@ export default function App() {
       // Минимальный ПДК среди всех выбросов всех источников (для совместимости со старым API)
       const allPdks = sources.flatMap(s => (s.emissions || []).map(e => e.pdk ?? 0.5));
       const pdk = allPdks.length ? Math.min(...allPdks) : 0.5;
-      // Разворачиваем площадные источники в сетку точечных источников
-      const expandedSources = sources.flatMap((src) => {
-        if (src.type !== "area") return [src];
-        const radius = src.area_radius_m || 100;
-        const subdivisions = src.area_subdivisions || 5;
-        const n = Math.max(1, parseInt(subdivisions, 10) || 5);
-        const pts = [];
-        for (let ix = 0; ix < n; ix++) {
-          for (let iy = 0; iy < n; iy++) {
-            const dx = ((ix + 0.5) - n / 2) * (2 * radius / n);
-            const dy = ((iy + 0.5) - n / 2) * (2 * radius / n);
-            const lat = (src.lat || 0) + (dy / 111000);
-            const lon = (src.lon || 0) + (dx / (111000 * Math.cos(((src.lat || 0) * Math.PI) / 180)));
-            const newEmissions = (src.emissions || []).map((e) => ({ ...e, emission_gs: (e.emission_gs || 0) / (n * n) }));
-            pts.push({ ...src, lat, lon, emissions: newEmissions });
-          }
-        }
-        return pts;
-      });
-
-      const payload = { sources: expandedSources, meteo, grid, pdk };
+      // Площадные источники разворачиваются в сетку точечных подысточников
+      // на бэкенде (ОНД-86, суперпозиция). Передаём тип и геометрию как есть.
+      const payload = { sources: toBackendSources(sources), meteo, grid, pdk };
       const res = await calculate(payload);
       // Замораживаем в результате вещество главного (худшего) расчёта.
       // by_substance теперь содержит результаты по всем веществам отдельно.

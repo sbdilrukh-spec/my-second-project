@@ -563,6 +563,26 @@ function circleLatLngs(centerLat, centerLon, radius, segments = 36) {
   return pts;
 }
 
+// Углы прямоугольника площадного источника (L×W, повёрнутого на angleDeg)
+function rectLatLngs(centerLat, centerLon, length, width, angleDeg = 0) {
+  const latRad = (centerLat || 0) * Math.PI / 180;
+  const cosLat = Math.cos(latRad) || 1;
+  const L = (length || 0) / 2;
+  const W = (width || 0) / 2;
+  const a = ((angleDeg || 0) * Math.PI) / 180;
+  const cosA = Math.cos(a);
+  const sinA = Math.sin(a);
+  // Углы в локальной системе (u вдоль длины, v вдоль ширины)
+  const corners = [[-L, -W], [L, -W], [L, W], [-L, W]];
+  return corners.map(([u, v]) => {
+    const dx = u * cosA - v * sinA;
+    const dy = u * sinA + v * cosA;
+    const lat = (centerLat || 0) + dy / 111000;
+    const lon = (centerLon || 0) + dx / (111000 * cosLat);
+    return [lat, lon];
+  });
+}
+
 // ─── Кнопки переключения режима ───────────────────────────────────────────────
 function ViewToggle({ mode, onChange }) {
   const btnBase = {
@@ -756,7 +776,7 @@ export default function MapView({
         src.type === "area" ? (
           <Polygon
             key={"area-" + i}
-            positions={circleLatLngs(src.lat || 41.3, src.lon || 69.24, src.area_radius_m || 100)}
+            positions={rectLatLngs(src.lat || 41.3, src.lon || 69.24, src.area_length || 200, src.area_width || 100, src.area_angle || 0)}
             pathOptions={{
               color: "#7C2D12",
               weight: 2,
@@ -765,7 +785,8 @@ export default function MapView({
             }}
           >
             <Popup>
-              <b>{src.name}</b><br />Площадной источник<br />Радиус: {src.area_radius_m || 0} м
+              <b>{src.name}</b><br />Площадной источник<br />
+              {src.area_length || 0} × {src.area_width || 0} м, угол {src.area_angle || 0}°
             </Popup>
           </Polygon>
         ) : (

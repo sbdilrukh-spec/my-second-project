@@ -45,6 +45,81 @@ def _s2_vectorized(y: np.ndarray, x: np.ndarray, sigma_coeff: float) -> np.ndarr
 
 
 # ---------------------------------------------------------------------------
+# Площадной источник: разбиение на сетку точечных подысточников
+# ---------------------------------------------------------------------------
+
+def _subsource_offsets(src):
+    """
+    Возвращает смещения (dx_восток, dy_север) в метрах от центра источника
+    для каждого точечного подысточника.
+
+    Для трубного (точечного) источника — единственная точка [(0, 0)].
+    Для площадного (source_type == "area") — центры ячеек равномерной сетки
+    N×N внутри прямоугольника L×W, повёрнутого на area_angle.
+    """
+    if getattr(src, "source_type", "stack") != "area":
+        return [(0.0, 0.0)]
+
+    L = getattr(src, "area_length", None) or 0.0
+    W = getattr(src, "area_width", None) or 0.0
+    if L <= 0 or W <= 0:
+        return [(0.0, 0.0)]
+
+    n = int(getattr(src, "area_subdivisions", None) or 5)
+    n = max(1, min(n, 20))  # ограничиваем 20×20=400 подысточников
+
+    ang = np.radians(getattr(src, "area_angle", None) or 0.0)
+    cos_a, sin_a = np.cos(ang), np.sin(ang)
+
+    offsets = []
+    for i in range(n):
+        u = -L / 2.0 + L * (i + 0.5) / n   # вдоль длины
+        for j in range(n):
+            v = -W / 2.0 + W * (j + 0.5) / n  # вдоль ширины
+            dx = u * cos_a - v * sin_a
+            dy = u * sin_a + v * cos_a
+            offsets.append((float(dx), float(dy)))
+    return offsets
+
+
+def _source_contribution(src, Cm, Xm, sigma_coeff, wd_rad, grid_lats, grid_lons):
+    """
+    Вклад источника (точечного или площадного) в концентрацию по массиву точек.
+
+    Cm/Xm рассчитаны по полному выбросу M источника. Для площадного источника
+    выброс делится поровну между N подысточниками (Cm ∝ M, поэтому Cm_sub = Cm/N),
+    а Xm от выброса не зависит и одинаков для всех подысточников. Итоговое поле —
+    сумма гауссовых вкладов всех подысточников (суперпозиция, ОНД-86).
+    """
+    offsets = _subsource_offsets(src)
+    n_sub = len(offsets)
+    Cm_sub = Cm / n_sub
+
+    src_lat_rad = src.lat * np.pi / 180.0
+    cos_lat = np.cos(src_lat_rad)
+
+    total = np.zeros(len(grid_lats))
+    for ox, oy in offsets:
+        sub_lat = src.lat + oy / 111_000.0
+        sub_lon = src.lon + ox / (111_000.0 * cos_lat)
+
+        dx_e = (grid_lons - sub_lon) * 111_000.0 * cos_lat
+        dy_n = (grid_lats - sub_lat) * 111_000.0
+
+        # Поворот в систему «по ветру»
+        x_wind = -(dx_e * np.sin(wd_rad) + dy_n * np.cos(wd_rad))
+        y_wind = dx_e * np.cos(wd_rad) - dy_n * np.sin(wd_rad)
+
+        pos = x_wind > 0
+        r = np.where(pos, x_wind / Xm, 0.0)
+        s1 = _s1_vectorized(r)
+        s2 = np.where(pos, _s2_vectorized(y_wind, x_wind, sigma_coeff), 0.0)
+        total += Cm_sub * s1 * s2
+
+    return total
+
+
+# ---------------------------------------------------------------------------
 # Расчёт параметров одного источника (Cm, Xm)
 # ---------------------------------------------------------------------------
 
@@ -180,34 +255,32 @@ def _compute_single_direction(sources, sigma_coeff, A, Ta, wd_rad, grid_lats, gr
         Cm = params["Cm"]
         Xm = params["Xm"]
 
-        src_results.append({
-            "name": src.name,
-            "cm_mg": round(Cm, 6),   # формула ОНД-86 уже даёт мг/м³
-            "xm": round(Xm, 1),
-        })
-
         if Cm <= 0 or Xm <= 0:
+            src_results.append({
+                "name": src.name,
+                "cm_mg": round(Cm, 6),
+                "xm": round(Xm, 1),
+            })
             continue
 
-        # Перемещение от источника до каждой точки сетки (метры, Восток/Север)
-        src_lat_rad = src.lat * np.pi / 180.0
-        dx_e = (grid_lons - src.lon) * 111_000.0 * np.cos(src_lat_rad)
-        dy_n = (grid_lats - src.lat) * 111_000.0
-
-        # Поворот в систему «по ветру»
+        # Вклад источника (для площадного — сумма по сетке подысточников).
         # Ветер дует ОТ направления wind_direction → факел идёт В сторону wind_direction+180°
-        x_wind = -(dx_e * np.sin(wd_rad) + dy_n * np.cos(wd_rad))
-        y_wind = dx_e * np.cos(wd_rad) - dy_n * np.sin(wd_rad)
-
-        # Концентрации (только подветренная сторона: x_wind > 0)
-        r = np.where(x_wind > 0, x_wind / Xm, 0.0)
-        s1_vals = _s1_vectorized(r)
-        s2_vals = np.where(
-            x_wind > 0,
-            _s2_vectorized(y_wind, x_wind, sigma_coeff),
-            0.0,
+        contrib = _source_contribution(
+            src, Cm, Xm, sigma_coeff, wd_rad, grid_lats, grid_lons,
         )
-        total_c += Cm * s1_vals * s2_vals
+        total_c += contrib
+
+        # Для точечного источника Cm — аналитический максимум ОНД-86.
+        # Для площадного аналитический Cm относится к полному выбросу из одной
+        # точки и завышен; отчётным берём фактический максимум приземного поля
+        # самого источника (распределённого по площадке).
+        is_area = getattr(src, "source_type", "stack") == "area"
+        reported_cm = float(contrib.max()) if is_area else Cm
+        src_results.append({
+            "name": src.name,
+            "cm_mg": round(reported_cm, 6),   # формула ОНД-86 уже даёт мг/м³
+            "xm": round(Xm, 1),
+        })
 
     return total_c, src_results
 
@@ -236,21 +309,12 @@ def _per_source_at_point(sources, sigma_coeff, A, Ta, wd_rad, target_lat, target
             contributions.append({"name": src.name, "src_index": src_idx, "contribution_mg": 0.0})
             continue
 
-        src_lat_rad = src.lat * np.pi / 180.0
-        dx_e = (target_lon - src.lon) * 111_000.0 * np.cos(src_lat_rad)
-        dy_n = (target_lat - src.lat) * 111_000.0
-        x_wind = -(dx_e * np.sin(wd_rad) + dy_n * np.cos(wd_rad))
-        y_wind = dx_e * np.cos(wd_rad) - dy_n * np.sin(wd_rad)
-
-        if x_wind <= 0:
-            contributions.append({"name": src.name, "src_index": src_idx, "contribution_mg": 0.0})
-            continue
-
-        r = x_wind / Xm
-        # _s1_vectorized и _s2_vectorized работают и со скалярами через np.array
-        s1 = float(_s1_vectorized(np.array([r]))[0])
-        s2 = float(_s2_vectorized(np.array([y_wind]), np.array([x_wind]), sigma_coeff)[0])
-        c_mg = float(Cm * s1 * s2)
+        # Вклад в одной точке (для площадного — сумма по подысточникам).
+        c_arr = _source_contribution(
+            src, Cm, Xm, sigma_coeff, wd_rad,
+            np.array([target_lat]), np.array([target_lon]),
+        )
+        c_mg = float(c_arr[0])
         contributions.append({"name": src.name, "src_index": src_idx, "contribution_mg": c_mg})
 
     return contributions
@@ -445,7 +509,8 @@ class _SubstanceSourceProxy:
     """Лёгкий прокси: подсовывает compute_grid `get_emission_gs()` от одного вещества."""
 
     __slots__ = ("name", "lat", "lon", "height", "diameter", "velocity",
-                 "temperature", "_emission_gs")
+                 "temperature", "_emission_gs", "source_type", "area_length",
+                 "area_width", "area_angle", "area_subdivisions")
 
     def __init__(self, src, emission_gs: float, name: str = None):
         self.name = name or src.name
@@ -456,6 +521,12 @@ class _SubstanceSourceProxy:
         self.velocity = src.velocity
         self.temperature = src.temperature
         self._emission_gs = emission_gs
+        # Параметры площадного источника — чтобы прокси тоже разворачивался в сетку
+        self.source_type = getattr(src, "source_type", "stack")
+        self.area_length = getattr(src, "area_length", None)
+        self.area_width = getattr(src, "area_width", None)
+        self.area_angle = getattr(src, "area_angle", None)
+        self.area_subdivisions = getattr(src, "area_subdivisions", None)
 
     def get_emission_gs(self) -> float:
         return self._emission_gs

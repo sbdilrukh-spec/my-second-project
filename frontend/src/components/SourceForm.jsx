@@ -21,7 +21,10 @@ export function createDefaultSource(cityLat, cityLon, idx) {
   return {
     ...STACK_DEFAULTS,
     type: "stack",
-    area_radius_m: 100,
+    // Параметры площадного источника (прямоугольник L×W, угол поворота)
+    area_length: 200,
+    area_width: 100,
+    area_angle: 0,
     area_subdivisions: 5,
     name: `Источник ${idx + 1}`,
     lat: cityLat ?? STACK_DEFAULTS.lat,
@@ -150,13 +153,24 @@ export default function SourceForm({
         </>
       )}
 
-      {/* --- Поля для площадного источника --- */}
+      {/* --- Поля для площадного источника (прямоугольник) --- */}
       {source.type === "area" && (
         <>
+          {stackField("height", t.height)}
           <div className="field-row">
-            <label>{t.areaRadius || "Радиус площади, м"}</label>
-            <input type="number" step="1" min="1" value={source.area_radius_m || 100}
-              onChange={(e) => onChange(index, "area_radius_m", parseFloat(e.target.value) || 100)} />
+            <label>{t.areaLength || "Длина, м"}</label>
+            <input type="number" step="1" min="1" value={source.area_length || 200}
+              onChange={(e) => onChange(index, "area_length", parseFloat(e.target.value) || 200)} />
+          </div>
+          <div className="field-row">
+            <label>{t.areaWidth || "Ширина, м"}</label>
+            <input type="number" step="1" min="1" value={source.area_width || 100}
+              onChange={(e) => onChange(index, "area_width", parseFloat(e.target.value) || 100)} />
+          </div>
+          <div className="field-row">
+            <label>{t.areaAngle || "Угол поворота, °"}</label>
+            <input type="number" step="1" value={source.area_angle ?? 0}
+              onChange={(e) => onChange(index, "area_angle", parseFloat(e.target.value) || 0)} />
           </div>
           <div className="field-row">
             <label>{t.areaSubdivisions || "Разбиение (NxN)"}</label>

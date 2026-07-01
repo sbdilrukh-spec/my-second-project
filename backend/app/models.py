@@ -50,6 +50,17 @@ class SourceInput(BaseModel):
     velocity: float      # Скорость выхода газов, м/с
     temperature: float   # Температура газов, °C
 
+    # Тип источника: "stack" — точечный/трубный (по умолчанию),
+    #                "area"  — площадной (прямоугольник L×W).
+    # Площадной источник при расчёте разворачивается в сетку N×N точечных
+    # подысточников с одинаковыми параметрами; суммарный выброс делится поровну
+    # (ОНД-86: совокупность точечных источников — суперпозиция вкладов).
+    source_type: str = "stack"
+    area_length: Optional[float] = None       # Длина прямоугольника, м
+    area_width: Optional[float] = None        # Ширина прямоугольника, м
+    area_angle: Optional[float] = None        # Угол поворота, ° (0 = длина по оси В→З)
+    area_subdivisions: Optional[int] = None   # Разбиение по стороне (всего N×N подысточников)
+
     # Новая модель: массив выбросов (одно вещество = одна запись)
     emissions: Optional[List[EmissionEntry]] = None
 
