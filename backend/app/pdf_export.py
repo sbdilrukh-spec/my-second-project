@@ -110,7 +110,9 @@ def _make_concentration_plot(points_data: list, grid_step: float = 500,
                               grid_params: dict = None,
                               sources: list = None,
                               boundary: list = None,
-                              pdk: float = None) -> io.BytesIO:
+                              pdk: float = None,
+                              transparent: bool = False,
+                              dpi: int = 150) -> io.BytesIO:
     """
     Сеточная карта рассеивания в стиле ОНД-86:
     каждая ячейка содержит числовое значение концентрации.
@@ -118,7 +120,17 @@ def _make_concentration_plot(points_data: list, grid_step: float = 500,
 
     Если передан pdk, значения в ячейках выводятся в долях ПДК
     (c / ПДК), иначе — в исходных единицах (мг/м³).
+
+    transparent=True — прозрачный фон и полупрозрачная заливка ячеек
+    (для наложения на свою подложку в CorelDraw): пустые ячейки полностью
+    прозрачны, заполненные — цветные с альфой, сквозь них видна подложка.
+    dpi — разрешение растра; для экспорта в Corel имеет смысл 300+, чтобы
+    цифры оставались чёткими при увеличении.
     """
+    from matplotlib.colors import to_rgba
+    # Альфа заливки: на прозрачном фоне ячейки полупрозрачны, чтобы сквозь
+    # них просвечивала подложка; в PDF (transparent=False) — плотный цвет.
+    cell_alpha = 0.45 if transparent else 1.0
     lats = np.array([p["lat"] for p in points_data])
     lons = np.array([p["lon"] for p in points_data])
     conc_raw = np.array([p["c"] for p in points_data])
@@ -175,17 +187,24 @@ def _make_concentration_plot(points_data: list, grid_step: float = 500,
             ratio = c_val / max_c if max_c > 0 else 0
             is_max = abs(c_val - max_c) < max_c * 0.001 and c_val > 0
 
-            # Цвет фона
+            # Цвет фона ячейки
             if is_max:
-                fc = "#FF9999"
+                base = "#FF9999"
             elif ratio > 0.7:
-                fc = "#FFCC66"
+                base = "#FFCC66"
             elif ratio > 0.3:
-                fc = "#FFFF99"
+                base = "#FFFF99"
             elif ratio > 0.05:
-                fc = "#FFFFDD"
+                base = "#FFFFDD"
             else:
-                fc = "#FFFFFF"
+                base = None  # пустая ячейка
+
+            if base is None:
+                # На прозрачном фоне пустые ячейки полностью прозрачны
+                # (видна подложка), в PDF — белые.
+                fc = "none" if transparent else "#FFFFFF"
+            else:
+                fc = to_rgba(base, cell_alpha) if transparent else base
 
             rect = plt.Rectangle(
                 (x_val - grid_step / 2, y_val - grid_step / 2),
@@ -280,7 +299,8 @@ def _make_concentration_plot(points_data: list, grid_step: float = 500,
 
     fig.subplots_adjust(left=0.12, right=0.95, bottom=0.12, top=0.92)
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight", pad_inches=0.3)
+    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight",
+                pad_inches=0.3, transparent=transparent)
     plt.close(fig)
     buf.seek(0)
     return buf

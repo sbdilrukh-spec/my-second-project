@@ -166,7 +166,7 @@ export default function ResultsPanel({
           }}
           onClick={onExportMapPng}
           disabled={exportingPng}
-          title="Прозрачный PNG карт рассеивания (по одному на вещество) — для наложения в CorelDraw"
+          title="Прозрачные PNG для наложения в CorelDraw: на каждое вещество два файла — изолинии и сетка ОНД с числами (высокое разрешение, чёткие цифры)"
         >
           {exportingPng ? "Готовим PNG..." : "🎨 Скачать карты PNG (для CorelDraw)"}
         </button>

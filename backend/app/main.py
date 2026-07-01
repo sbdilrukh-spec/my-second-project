@@ -16,7 +16,7 @@ from .models import (
 )
 from .meteo_data import CITIES
 from .ond86 import compute_grid, compute_szz_boundary, compute_per_substance
-from .pdf_export import generate_pdf, _make_transparent_dispersion_map
+from .pdf_export import generate_pdf, _make_transparent_dispersion_map, _make_concentration_plot
 from .substances import SUBSTANCES
 from .tables import generate_pdv_tables, generate_ovos_tables
 from .import_sources import parse_csv, parse_excel, generate_template_csv, generate_template_xlsx
@@ -755,6 +755,10 @@ def export_map_png(req: CalculationRequest):
                 if not sub_points:
                     continue
 
+                # Безопасное имя файла (общее для обоих вариантов карты)
+                safe_name = re.sub(r"[^A-Za-zА-Яа-я0-9_-]+", "_", sub_name).strip("_") or f"map_{idx+1}"
+
+                # 1) Изолинии (цветное облако) — как и раньше
                 png_buf = _make_transparent_dispersion_map(
                     sub_points,
                     sources=sources_for_map,
@@ -765,13 +769,29 @@ def export_map_png(req: CalculationRequest):
                     show_title=False,  # без заголовка
                     grid_data=grid_data,
                 )
-                if png_buf is None:
-                    continue
+                if png_buf is not None:
+                    zf.writestr(f"izolinii_{safe_name}.png", png_buf.getvalue())
 
-                # Безопасное имя файла
-                safe_name = re.sub(r"[^A-Za-zА-Яа-я0-9_-]+", "_", sub_name).strip("_") or f"map_{idx+1}"
-                fname = f"karta-rasseivaniya_{safe_name}.png"
-                zf.writestr(fname, png_buf.getvalue())
+                # 2) Сетка ОНД с числами — прозрачный фон, полупрозрачная
+                #    заливка, высокое разрешение (чёткие цифры при увеличении).
+                grid_step = grid_data.get("step", 500) if grid_data else 500
+                try:
+                    grid_buf = _make_concentration_plot(
+                        sub_points,
+                        grid_step=grid_step,
+                        title=f"Карта рассеивания {sub_name}, доли ПДК",
+                        grid_params=grid_data,
+                        sources=None,
+                        boundary=boundary,
+                        pdk=sub_pdk,
+                        transparent=True,
+                        dpi=300,
+                    )
+                    if grid_buf is not None:
+                        zf.writestr(f"setka-ond_{safe_name}.png", grid_buf.getvalue())
+                except Exception as grid_err:
+                    # Сетка не критична — изолинии уже в архиве, не валим весь экспорт
+                    print(f"[map-png] Сетка ОНД для «{sub_name}» не построена: {grid_err}")
 
         zip_buf.seek(0)
         return StreamingResponse(
