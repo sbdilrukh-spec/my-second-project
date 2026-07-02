@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { fetchCities, fetchSubstances, fetchWeather, calculate, fetchTables, exportPdf, exportMapPng, exportExcel } from "./api.js";
 import { translations } from "./i18n.js";
 import SourceForm, { createDefaultSource, migrateSource } from "./components/SourceForm.jsx";
@@ -156,7 +156,12 @@ export default function App() {
     localStorage.setItem("customSubstances", JSON.stringify(customSubstances));
   }, [customSubstances]);
 
-  const allSubstances = [...substances, ...customSubstances];
+  // useMemo: стабильная ссылка на объединённый список — иначе каждый рендер
+  // создаёт новый массив и ломает React.memo у 200 карточек SourceForm.
+  const allSubstances = useMemo(
+    () => [...substances, ...customSubstances],
+    [substances, customSubstances]
+  );
 
   // Substance editor modal
   const [showSubstanceEditor, setShowSubstanceEditor] = useState(false);
@@ -314,9 +319,9 @@ export default function App() {
     setPendingNewSourceBase(null);
   };
 
-  const handleRemoveSource = (index) => {
+  const handleRemoveSource = useCallback((index) => {
     setSources((prev) => prev.filter((_, i) => i !== index));
-  };
+  }, []);
 
   const handleBulkAddSources = (parsed) => {
     const city = cities.find((c) => c.name === meteo.city);
@@ -328,10 +333,12 @@ export default function App() {
     setSources((prev) => [...prev, ...newSources]);
   };
 
-  const handlePickFromMap = (index) => {
-    setPickingIndex(pickingIndex === index ? null : index);
+  const handlePickFromMap = useCallback((index) => {
+    // Функциональная форма — чтобы обработчик не зависел от pickingIndex
+    // и оставался стабильным (иначе рвётся React.memo у карточек).
+    setPickingIndex((prev) => (prev === index ? null : index));
     setPickingEnterprise(false);
-  };
+  }, []);
 
   const handleMapPick = (index, lat, lon) => {
     handleSourceChange(index, "lat", lat);
@@ -396,9 +403,9 @@ export default function App() {
   };
 
   // Добавление пользовательского вещества
-  const handleAddCustomSubstance = (substance) => {
+  const handleAddCustomSubstance = useCallback((substance) => {
     setCustomSubstances((prev) => [...prev, substance]);
-  };
+  }, []);
 
   // Загрузка погоды
   const [weatherLoading, setWeatherLoading] = useState(false);

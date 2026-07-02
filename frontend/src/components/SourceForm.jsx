@@ -49,7 +49,7 @@ export function migrateSource(s) {
   return { ...s, emissions: [flat], type };
 }
 
-export default function SourceForm({
+function SourceForm({
   source,
   index,
   onChange,
@@ -368,3 +368,8 @@ export default function SourceForm({
     </div>
   );
 }
+
+// React.memo: карточка перерисовывается только когда меняются её пропсы
+// (её source или список веществ), а не при любом изменении в App.
+// Критично при 200 источниках — иначе правка одного поля перерисовывает все.
+export default React.memo(SourceForm);
