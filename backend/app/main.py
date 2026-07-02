@@ -1,11 +1,13 @@
 from fastapi import FastAPI, HTTPException, Query, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, PlainTextResponse
+from fastapi.responses import StreamingResponse, PlainTextResponse, Response
 from pydantic import BaseModel
 from typing import Optional
+import base64
 import io
 import json
 import os
+import secrets
 import openpyxl
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 
@@ -97,6 +99,44 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ---------------------------------------------------------------------------
+# Общий пароль на весь сайт (HTTP Basic Auth).
+# Пароль задаётся переменной окружения APP_PASSWORD (в Render → Environment),
+# логин — APP_USERNAME (по умолчанию "admin"). Если APP_PASSWORD пуст —
+# защита выключена (локальная разработка, текущее поведение не меняется).
+# /api/health открыт всегда, иначе health-check Render не проходит и деплой
+# не поднимается. Браузер сам показывает окно ввода пароля при ответе 401.
+# ---------------------------------------------------------------------------
+APP_USERNAME = os.environ.get("APP_USERNAME", "admin")
+APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
+
+
+@app.middleware("http")
+async def basic_auth_middleware(request, call_next):
+    if (
+        not APP_PASSWORD                       # пароль не задан → защита выключена
+        or request.method == "OPTIONS"        # CORS preflight не несёт заголовка авторизации
+        or request.url.path == "/api/health"  # health-check Render должен быть открыт
+    ):
+        return await call_next(request)
+
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Basic "):
+        try:
+            user, _, pwd = base64.b64decode(auth[6:]).decode("utf-8").partition(":")
+            # Сравнение с защитой от тайминг-атак
+            if secrets.compare_digest(user, APP_USERNAME) and secrets.compare_digest(pwd, APP_PASSWORD):
+                return await call_next(request)
+        except Exception:
+            pass
+
+    return Response(
+        status_code=401,
+        headers={"WWW-Authenticate": 'Basic realm="OND-86"'},
+        content="Требуется авторизация",
+    )
 
 
 # ---------------------------------------------------------------------------

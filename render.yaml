@@ -8,3 +8,11 @@ services:
     healthCheckPath: /api/health
     dockerfilePath: ./Dockerfile
     dockerContext: .
+    envVars:
+      # Общий пароль на весь сайт. Значения задаются вручную в дашборде
+      # Render (Environment) — sync:false держит их вне git.
+      # Пока APP_PASSWORD не задан, защита выключена.
+      - key: APP_USERNAME
+        sync: false
+      - key: APP_PASSWORD
+        sync: false
