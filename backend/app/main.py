@@ -760,14 +760,23 @@ def export_map_png(req: CalculationRequest):
                         "lat": src.get("lat"), "lon": src.get("lon"), "name": src.get("name", "")
                     })
 
-        boundary = []
-        if req.enterprise and req.enterprise.boundary:
-            for p in req.enterprise.boundary:
+        def _pts_to_dicts(pts):
+            out = []
+            for p in pts or []:
                 try:
-                    boundary.append({"lat": p.lat, "lon": p.lon})
+                    out.append({"lat": p.lat, "lon": p.lon})
                 except AttributeError:
                     if isinstance(p, dict):
-                        boundary.append({"lat": p.get("lat"), "lon": p.get("lon")})
+                        out.append({"lat": p.get("lat"), "lon": p.get("lon")})
+            return out
+
+        # Несколько контуров-объектов (до 5); одиночный boundary — как один контур.
+        boundaries = []
+        if req.enterprise and req.enterprise.boundaries:
+            boundaries = [_pts_to_dicts(c) for c in req.enterprise.boundaries if c]
+        elif req.enterprise and req.enterprise.boundary:
+            boundaries = [_pts_to_dicts(req.enterprise.boundary)]
+        boundaries = [c for c in boundaries if c]
 
         grid_data = req.grid.model_dump() if req.grid else {}
 
@@ -802,7 +811,7 @@ def export_map_png(req: CalculationRequest):
                 png_buf = _make_transparent_dispersion_map(
                     sub_points,
                     sources=sources_for_map,
-                    boundary=boundary,
+                    boundaries=boundaries,
                     pdk=sub_pdk,
                     substance_name=sub_name,
                     show_axes=False,   # для CorelDraw — без осей
@@ -822,7 +831,7 @@ def export_map_png(req: CalculationRequest):
                         title=f"Карта рассеивания {sub_name}, доли ПДК",
                         grid_params=grid_data,
                         sources=None,
-                        boundary=boundary,
+                        boundaries=boundaries,
                         pdk=sub_pdk,
                         transparent=True,
                         dpi=300,

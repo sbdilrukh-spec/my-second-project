@@ -697,6 +697,12 @@ export default function MapView({
   const fileInputRef = useRef(null);
   const defaultCenter = cityCenter || [41.2995, 69.2401];
 
+  // Контуры предприятия: несколько объектов (до 5) или один старый boundary.
+  const entBoundaries = (enterprise?.boundaries && enterprise.boundaries.length)
+    ? enterprise.boundaries
+    : (enterprise?.boundary?.length ? [enterprise.boundary] : []);
+  const allEntPoints = entBoundaries.reduce((acc, c) => acc.concat(c || []), []);
+
   const gridCenter = sources.length > 0 ? {
     lat: sources.reduce((s, src) => s + (src.lat || 0), 0) / sources.length,
     lon: sources.reduce((s, src) => s + (src.lon || 0), 0) / sources.length,
@@ -745,7 +751,7 @@ export default function MapView({
       )}
 
       <RecenterMap center={cityCenter} />
-      <FitToBoundary boundary={enterprise?.boundary} trigger={fitMapTrigger || 0} />
+      <FitToBoundary boundary={allEntPoints} trigger={fitMapTrigger || 0} />
       <ClickHandler
         pickingIndex={pickingIndex}
         onPick={onPick}
@@ -753,23 +759,27 @@ export default function MapView({
         onEnterprisePick={onEnterprisePick}
       />
 
-      {/* Контур (полигон) предприятия / карьера */}
-      {enterprise?.boundary?.length >= 3 && (
-        <Polygon
-          positions={enterprise.boundary.map((p) => [p.lat, p.lon])}
-          pathOptions={{
-            color: "#F97316",
-            weight: 3,
-            fillColor: "#F97316",
-            fillOpacity: 0.18,
-          }}
-        >
-          <Popup>
-            <b>🏭 {enterprise.name || "Площадка предприятия"}</b><br />
-            Точек контура: {enterprise.boundary.length}
-          </Popup>
-        </Polygon>
-      )}
+      {/* Контуры (полигоны) предприятия / карьеров — каждый объект отдельно */}
+      {entBoundaries.map((contour, ci) => (
+        (contour?.length >= 3) && (
+          <Polygon
+            key={ci}
+            positions={contour.map((p) => [p.lat, p.lon])}
+            pathOptions={{
+              color: "#F97316",
+              weight: 3,
+              fillColor: "#F97316",
+              fillOpacity: 0.18,
+            }}
+          >
+            <Popup>
+              <b>🏭 {enterprise.name || "Площадка предприятия"}</b>
+              {entBoundaries.length > 1 && <> — объект {ci + 1}</>}<br />
+              Точек контура: {contour.length}
+            </Popup>
+          </Polygon>
+        )
+      ))}
 
       {/* Источники: точечные и площадные */}
       {sources.map((src, i) => (

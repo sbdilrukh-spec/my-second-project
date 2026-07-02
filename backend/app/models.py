@@ -121,7 +121,11 @@ class EnterpriseInput(BaseModel):
     projectNumber: Optional[str] = None
     client: Optional[str] = None
     developer: Optional[str] = None
+    # Один контур (обратная совместимость со старыми проектами)
     boundary: Optional[List[BoundaryPoint]] = None
+    # Несколько отдельных контуров-объектов (до 5). Если задан — используется он;
+    # каждый контур рисуется отдельным замкнутым полигоном (не соединяются).
+    boundaries: Optional[List[List[BoundaryPoint]]] = None
 
 
 class CalculationRequest(BaseModel):

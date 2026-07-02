@@ -42,6 +42,30 @@ function toBackendSources(sources) {
   }));
 }
 
+// Контуры предприятия: до 5 отдельных объектов. Старые проекты хранят один
+// контур в enterprise.boundary — нормализуем всё к массиву контуров boundaries.
+export const MAX_BOUNDARIES = 5;
+
+function getBoundaries(ent) {
+  if (ent?.boundaries && ent.boundaries.length) return ent.boundaries;
+  if (ent?.boundary && ent.boundary.length) return [ent.boundary];
+  return [];
+}
+
+function allBoundaryPoints(ent) {
+  return getBoundaries(ent).reduce((acc, c) => acc.concat(c || []), []);
+}
+
+// Гарантируем поле boundaries (для отправки на бэкенд и отрисовки).
+function migrateEnterprise(ent) {
+  if (!ent) return ent;
+  if (Array.isArray(ent.boundaries)) return ent;
+  if (Array.isArray(ent.boundary) && ent.boundary.length) {
+    return { ...ent, boundaries: [ent.boundary] };
+  }
+  return { ...ent, boundaries: [] };
+}
+
 // Миграция старых проектов (radius -> x_length/y_length) + защита от некорректных значений
 function migrateGrid(g) {
   if (!g) return DEFAULT_GRID;
@@ -92,7 +116,7 @@ export default function App() {
       ? savedProject.sources.map(migrateSource)
       : [createDefaultSource(41.2995, 69.2401, 0)]
   );
-  const [enterprise, setEnterprise] = useState(savedProject?.enterprise || DEFAULT_ENTERPRISE);
+  const [enterprise, setEnterprise] = useState(migrateEnterprise(savedProject?.enterprise || DEFAULT_ENTERPRISE));
 
   const [result, setResult] = useState(null);
   const [displaySubstanceCode, setDisplaySubstanceCode] = useState(null); // выбранное для отображения вещество (если расчёт многовеществный)
@@ -105,6 +129,8 @@ export default function App() {
 
   const [pickingIndex, setPickingIndex] = useState(null);
   const [pickingEnterprise, setPickingEnterprise] = useState(false);
+  // Активный объект (контур) при вводе координат кликом по карте / в таблице
+  const [activeBoundaryIdx, setActiveBoundaryIdx] = useState(0);
   const [inputMode, setInputMode] = useState("cards"); // "cards" | "table"
   const [sidebarWide, setSidebarWide] = useState(false);
 
@@ -210,14 +236,18 @@ export default function App() {
     return result;
   })();
 
-  // Центроид контура предприятия — null если контур пуст
+  // Центроид всех контуров предприятия (по всем точкам) — null если пусто
   const enterpriseCentroid = (() => {
-    const b = enterprise.boundary;
+    const b = allBoundaryPoints(enterprise);
     if (!b || b.length === 0) return null;
     const lat = b.reduce((s, p) => s + (p.lat || 0), 0) / b.length;
     const lon = b.reduce((s, p) => s + (p.lon || 0), 0) / b.length;
     return { lat, lon };
   })();
+
+  // Список контуров и суммарное число точек — для бейджей/кнопок
+  const boundaryList = getBoundaries(enterprise);
+  const boundaryPointCount = boundaryList.reduce((n, c) => n + (c?.length || 0), 0);
 
   useEffect(() => {
     const city = cities.find((c) => c.name === meteo.city);
@@ -353,21 +383,27 @@ export default function App() {
 
   // Клик по карте в режиме пикинга — добавляет точку в контур, режим остаётся
   const handleEnterprisePick = (lat, lon) => {
-    setEnterprise((prev) => ({
-      ...prev,
-      boundary: [...(prev.boundary || []), { lat, lon }],
-    }));
+    setEnterprise((prev) => {
+      const bs = getBoundaries(prev).map((c) => [...c]);
+      const idx = Math.min(activeBoundaryIdx, MAX_BOUNDARIES - 1);
+      while (bs.length <= idx) bs.push([]);
+      bs[idx] = [...bs[idx], { lat, lon }];
+      return { ...prev, boundaries: bs, boundary: bs[0] || [] };
+    });
   };
 
-  const handleBoundaryChange = (newBoundary) => {
-    setEnterprise((prev) => ({ ...prev, boundary: newBoundary }));
+  // Редактор отдаёт весь массив контуров (объектов)
+  const handleBoundaryChange = (newBoundaries) => {
+    const bs = Array.isArray(newBoundaries) ? newBoundaries : [];
+    setEnterprise((prev) => ({ ...prev, boundaries: bs, boundary: bs[0] || [] }));
 
-    // Когда контур задан, переносим в центроид все источники,
-    // которые ещё стоят в координатах "по умолчанию" (центр текущего города).
-    // Если пользователь уже двигал источник — оставляем где есть.
-    if (!newBoundary || newBoundary.length === 0) return;
-    const cLat = newBoundary.reduce((s, p) => s + (p.lat || 0), 0) / newBoundary.length;
-    const cLon = newBoundary.reduce((s, p) => s + (p.lon || 0), 0) / newBoundary.length;
+    // Когда контур задан, переносим в центроид все источники, которые ещё стоят
+    // в координатах "по умолчанию" (центр текущего города). Центроид — по всем
+    // точкам всех объектов. Если источник уже двигали — оставляем как есть.
+    const pts = bs.reduce((acc, c) => acc.concat(c || []), []);
+    if (pts.length === 0) return;
+    const cLat = pts.reduce((s, p) => s + (p.lat || 0), 0) / pts.length;
+    const cLon = pts.reduce((s, p) => s + (p.lon || 0), 0) / pts.length;
     const city = cities.find((c) => c.name === meteo.city);
     setSources((prev) => prev.map((src) => {
       const isAtCityDefault =
@@ -382,7 +418,7 @@ export default function App() {
   // используется кнопкой "Переместить все источники в контур" и
   // авто-снапом после подтверждения импорта.
   const handleSnapSourcesToBoundary = (opts = {}) => {
-    const b = enterprise.boundary;
+    const b = allBoundaryPoints(enterprise);
     if (!b || b.length === 0) {
       if (!opts.silent) {
         setError("Сначала задайте контур предприятия в модуле «🏭 Координаты предприятия».");
@@ -457,7 +493,7 @@ export default function App() {
           if (project.meteo) setMeteo(project.meteo);
           if (project.grid) setGrid(project.grid);
           if (project.selectedSubstance) setSelectedSubstance(project.selectedSubstance);
-          if (project.enterprise) setEnterprise(project.enterprise);
+          if (project.enterprise) setEnterprise(migrateEnterprise(project.enterprise));
         } catch {
           setError("Ошибка чтения файла проекта");
         }
@@ -642,15 +678,15 @@ export default function App() {
               className="btn-editor"
               onClick={() => setShowBoundaryEditor(true)}
               title={t.enterpriseBoundary}
-              style={enterprise.boundary?.length ? { background: "#ECFDF5", borderColor: "#A7F3D0" } : undefined}
+              style={boundaryPointCount ? { background: "#ECFDF5", borderColor: "#A7F3D0" } : undefined}
             >
               {t.enterpriseBoundary}
-              {enterprise.boundary?.length > 0 && (
+              {boundaryPointCount > 0 && (
                 <span style={{
                   marginLeft: 4, background: "#047857", color: "#fff",
                   borderRadius: 8, padding: "0 5px", fontSize: 10, fontWeight: 700,
                 }}>
-                  {enterprise.boundary.length}
+                  {boundaryList.length > 1 ? `${boundaryList.length}об · ${boundaryPointCount}` : boundaryPointCount}
                 </span>
               )}
             </button>
@@ -754,7 +790,7 @@ export default function App() {
             </div>
 
             {/* Кнопка "Переместить все источники в контур" — видна только когда контур задан */}
-            {enterprise.boundary?.length >= 3 && sources.length > 0 && (
+            {boundaryPointCount >= 3 && sources.length > 0 && (
               <button
                 className="btn-secondary btn-sm"
                 style={{ width: "100%", marginTop: 6, fontSize: 11, color: "#7C2D12", borderColor: "#FED7AA" }}
@@ -1086,7 +1122,10 @@ export default function App() {
       {/* ===== Редактор контура предприятия ===== */}
       {showBoundaryEditor && (
         <EnterpriseBoundaryEditor
-          boundary={enterprise.boundary || []}
+          boundaries={boundaryList}
+          activeIdx={activeBoundaryIdx}
+          onActiveIdxChange={setActiveBoundaryIdx}
+          maxObjects={MAX_BOUNDARIES}
           onChange={handleBoundaryChange}
           picking={pickingEnterprise}
           onTogglePicking={handleToggleBoundaryPicking}

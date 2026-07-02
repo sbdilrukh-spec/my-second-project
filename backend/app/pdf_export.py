@@ -110,6 +110,7 @@ def _make_concentration_plot(points_data: list, grid_step: float = 500,
                               grid_params: dict = None,
                               sources: list = None,
                               boundary: list = None,
+                              boundaries: list = None,
                               pdk: float = None,
                               transparent: bool = False,
                               dpi: int = 150) -> io.BytesIO:
@@ -241,10 +242,14 @@ def _make_concentration_plot(points_data: list, grid_step: float = 500,
         y = (lat - origin_lat) * 111000.0
         return x, y
 
-    # Контур предприятия / карьера — только линия, без заливки и нумерации
-    if boundary and len(boundary) >= 2:
+    # Контуры предприятия / карьеров — каждый отдельной линией, без заливки.
+    # Поддерживаем несколько контуров (boundaries); одиночный boundary — как один.
+    contours = boundaries if boundaries else ([boundary] if boundary else [])
+    for contour in contours:
+        if not contour or len(contour) < 2:
+            continue
         bx, by = [], []
-        for p in boundary:
+        for p in contour:
             try:
                 px, py = _ll_to_xy(float(p["lat"]), float(p["lon"]))
                 bx.append(px); by.append(py)
@@ -516,6 +521,7 @@ def _make_transparent_dispersion_map(
     points_data: list,
     sources: list = None,
     boundary: list = None,
+    boundaries: list = None,
     pdk: float = 0.5,
     substance_name: str = "",
     show_axes: bool = False,
@@ -668,10 +674,13 @@ def _make_transparent_dispersion_map(
     # просил убрать пронумерованные кружки. Контур площадки остаётся.
     _ = sources  # параметр оставляем в сигнатуре для совместимости
 
-    # Контур площадки — оранжевая линия
-    if boundary and len(boundary) >= 2:
+    # Контуры площадок — каждый отдельной оранжевой линией (не соединяются).
+    contours = boundaries if boundaries else ([boundary] if boundary else [])
+    for contour in contours:
+        if not contour or len(contour) < 2:
+            continue
         bx, by = [], []
-        for p in boundary:
+        for p in contour:
             try:
                 bx.append((float(p["lon"]) - origin_lon) * 111_000.0 * np.cos(lat_rad))
                 by.append((float(p["lat"]) - origin_lat) * 111_000.0)
@@ -1226,6 +1235,9 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
 
     enterprise = request_data.get("enterprise") or {}
     boundary = (enterprise.get("boundary") or [])
+    # Несколько контуров-объектов (до 5); если нет — используем одиночный boundary.
+    boundaries = enterprise.get("boundaries") or ([boundary] if boundary else [])
+    boundary_points_total = sum(len(c or []) for c in boundaries)
     ent_name = enterprise.get("name") or "—"
 
     sources_for_map = request_data.get("sources") or []
@@ -1275,14 +1287,14 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
                     title=title_text,
                     grid_params=grid_data,
                     sources=None,        # источники в карте отключены
-                    boundary=boundary,
+                    boundaries=boundaries,
                     pdk=sub_pdk,         # значения в ячейках — в долях ПДК
                 )
             else:
                 png_buf = _make_transparent_dispersion_map(
                     sub_points,
                     sources=sources_for_map,
-                    boundary=boundary,
+                    boundaries=boundaries,
                     pdk=sub_pdk,
                     substance_name=sub_name,
                     show_axes=show_axes,
@@ -1299,7 +1311,8 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
             info_lines = [f"<b>Предприятие:</b> {ent_name}"]
             if enterprise.get("address"):
                 info_lines.append(f"<b>Адрес:</b> {enterprise['address']}")
-            info_lines.append(f"<b>Точек контура:</b> {len(boundary)}")
+            _cont_label = f"Объектов: {len(boundaries)}, точек: {boundary_points_total}" if len(boundaries) > 1 else f"Точек контура: {boundary_points_total}"
+            info_lines.append(f"<b>{_cont_label}</b>")
             info_lines.append(f"<b>Вещество:</b> {sub_name}")
             info_lines.append(f"<b>ПДК:</b> {sub_pdk} мг/м³")
             story.append(Paragraph(" &nbsp;·&nbsp; ".join(info_lines), body_style))

@@ -9,7 +9,8 @@ const DEFAULT_ENTERPRISE = {
   projectNumber: "",
   client: "",
   developer: "",
-  boundary: [], // массив точек [{lat, lon}, ...] контура предприятия / карьера
+  boundary: [], // массив точек [{lat, lon}, ...] первого контура (обратная совместимость)
+  boundaries: [], // массив контуров-объектов [[{lat,lon}...], ...], до 5
 };
 
 export default function EnterpriseCard({ enterprise, onChange, t }) {
@@ -75,11 +76,18 @@ export default function EnterpriseCard({ enterprise, onChange, t }) {
               onChange={(e) => onChange({ ...enterprise, developer: e.target.value })}
             />
           </div>
-          {enterprise.boundary && enterprise.boundary.length > 0 && (
-            <div style={{ fontSize: 11, color: "#047857", marginTop: 6 }}>
-              ✓ {t.boundaryPointsCount}: {enterprise.boundary.length}
-            </div>
-          )}
+          {(() => {
+            const objs = (enterprise.boundaries && enterprise.boundaries.length)
+              ? enterprise.boundaries
+              : (enterprise.boundary?.length ? [enterprise.boundary] : []);
+            const total = objs.reduce((n, c) => n + (c?.length || 0), 0);
+            if (total === 0) return null;
+            return (
+              <div style={{ fontSize: 11, color: "#047857", marginTop: 6 }}>
+                ✓ {objs.length > 1 ? `Объектов: ${objs.length} · ` : ""}{t.boundaryPointsCount}: {total}
+              </div>
+            );
+          })()}
         </div>
       )}
     </div>
