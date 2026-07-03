@@ -583,6 +583,52 @@ function rectLatLngs(centerLat, centerLon, length, width, angleDeg = 0) {
   });
 }
 
+// ─── Маркер/полигон одного источника ─────────────────────────────────────────
+// React.memo: при правке одного источника (или любого поля в сайдбаре) не
+// пересоздаются divIcon и попапы всех остальных маркеров — при сотнях
+// источников это заметно тормозило каждое нажатие клавиши.
+const SourceMarker = React.memo(function SourceMarker({ src, i, onSourceMove }) {
+  if (src.type === "area") {
+    return (
+      <Polygon
+        positions={rectLatLngs(src.lat || 41.3, src.lon || 69.24, src.area_length || 200, src.area_width || 100, src.area_angle || 0)}
+        pathOptions={{
+          color: "#7C2D12",
+          weight: 2,
+          fillColor: "#7C2D12",
+          fillOpacity: 0.18,
+        }}
+      >
+        <Popup>
+          <b>{src.name}</b><br />Площадной источник<br />
+          {src.area_length || 0} × {src.area_width || 0} м, угол {src.area_angle || 0}°
+        </Popup>
+      </Polygon>
+    );
+  }
+  return (
+    <Marker
+      position={[src.lat || 41.3, src.lon || 69.24]}
+      draggable
+      eventHandlers={{ dragend(e) { const ll = e.target.getLatLng(); onSourceMove(i, ll.lat, ll.lng); } }}
+      icon={L.divIcon({
+        html: `<div style="background:#7C2D12;color:#fff;border-radius:50%;
+          width:24px;height:24px;display:flex;align-items:center;justify-content:center;
+          font-size:12px;font-weight:bold;border:2px solid #fff;
+          box-shadow:0 2px 6px rgba(0,0,0,0.5);font-family:sans-serif;">${i + 1}</div>`,
+        className: "",
+        iconAnchor: [12, 12],
+      })}
+    >
+      <Popup>
+        <b>{src.name}</b><br />
+        H={src.height}м D={src.diameter}м<br />
+        w₀={src.velocity}м/с T={src.temperature}°C
+      </Popup>
+    </Marker>
+  );
+});
+
 // ─── Кнопки переключения режима ───────────────────────────────────────────────
 function ViewToggle({ mode, onChange }) {
   const btnBase = {
@@ -783,44 +829,7 @@ export default function MapView({
 
       {/* Источники: точечные и площадные */}
       {sources.map((src, i) => (
-        src.type === "area" ? (
-          <Polygon
-            key={"area-" + i}
-            positions={rectLatLngs(src.lat || 41.3, src.lon || 69.24, src.area_length || 200, src.area_width || 100, src.area_angle || 0)}
-            pathOptions={{
-              color: "#7C2D12",
-              weight: 2,
-              fillColor: "#7C2D12",
-              fillOpacity: 0.18,
-            }}
-          >
-            <Popup>
-              <b>{src.name}</b><br />Площадной источник<br />
-              {src.area_length || 0} × {src.area_width || 0} м, угол {src.area_angle || 0}°
-            </Popup>
-          </Polygon>
-        ) : (
-          <Marker
-            key={i}
-            position={[src.lat || 41.3, src.lon || 69.24]}
-            draggable
-            eventHandlers={{ dragend(e) { const ll = e.target.getLatLng(); onSourceMove(i, ll.lat, ll.lng); } }}
-            icon={L.divIcon({
-              html: `<div style="background:#7C2D12;color:#fff;border-radius:50%;
-                width:24px;height:24px;display:flex;align-items:center;justify-content:center;
-                font-size:12px;font-weight:bold;border:2px solid #fff;
-                box-shadow:0 2px 6px rgba(0,0,0,0.5);font-family:sans-serif;">${i + 1}</div>`,
-              className: "",
-              iconAnchor: [12, 12],
-            })}
-          >
-            <Popup>
-              <b>{src.name}</b><br />
-              H={src.height}м D={src.diameter}м<br />
-              w₀={src.velocity}м/с T={src.temperature}°C
-            </Popup>
-          </Marker>
-        )
+        <SourceMarker key={i} src={src} i={i} onSourceMove={onSourceMove} />
       ))}
 
       {/* Heatmap */}

@@ -46,6 +46,11 @@ function toBackendSources(sources) {
 // контур в enterprise.boundary — нормализуем всё к массиву контуров boundaries.
 export const MAX_BOUNDARIES = 5;
 
+// Сколько карточек источников показывать за раз (кнопка «Показать ещё»)
+// и с какого количества сворачивать карточки по умолчанию.
+const CARDS_PAGE = 30;
+const COLLAPSE_THRESHOLD = 15;
+
 function getBoundaries(ent) {
   if (ent?.boundaries && ent.boundaries.length) return ent.boundaries;
   if (ent?.boundary && ent.boundary.length) return [ent.boundary];
@@ -102,9 +107,11 @@ export default function App() {
   const t = translations[lang];
 
   // --- Восстановление из localStorage ---
-  const savedProject = (() => {
+  // Лениво, строго один раз: на больших проектах JSON.parse занимает десятки
+  // миллисекунд, и парсить его на каждом рендере (каждое нажатие клавиши) нельзя.
+  const [savedProject] = useState(() => {
     try { return JSON.parse(localStorage.getItem("ond86_autosave")); } catch { return null; }
-  })();
+  });
 
   const [cities, setCities] = useState([]);
   const [substances, setSubstances] = useState([]);
@@ -126,6 +133,11 @@ export default function App() {
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState(null);
   const [viewMode, setViewMode] = useState("heatmap");
+
+  // Поиск и порционный вывод карточек: при сотнях источников рендерить все
+  // карточки сразу нельзя — DOM разрастается и интерфейс замирает.
+  const [sourceFilter, setSourceFilter] = useState("");
+  const [visibleCards, setVisibleCards] = useState(CARDS_PAGE);
 
   const [pickingIndex, setPickingIndex] = useState(null);
   const [pickingEnterprise, setPickingEnterprise] = useState(false);
@@ -189,6 +201,40 @@ export default function App() {
     [substances, customSubstances]
   );
 
+  // «Усыновление» веществ из загруженного проекта: файл проекта хранит вещество
+  // внутри каждого выброса, но выпадающие списки строятся из справочника
+  // (бэкенд + пользовательские). Если проект создан на другой машине (например,
+  // на сайте, где добавляли свои вещества), локальный справочник их не знает —
+  // добавляем такие вещества в пользовательские, чтобы списки и импорт их видели.
+  useEffect(() => {
+    if (substances.length === 0) return; // ждём справочник с бэкенда
+    const known = new Set(allSubstances.map((s) => String(s.code)));
+    const missing = [];
+    for (const src of sources) {
+      for (const em of src.emissions || []) {
+        const sub = em?.substance;
+        if (sub?.code && !known.has(String(sub.code)) &&
+            !missing.some((m) => String(m.code) === String(sub.code))) {
+          missing.push({ ...sub, custom: true });
+        }
+      }
+    }
+    if (missing.length > 0) {
+      setCustomSubstances((prev) => [...prev, ...missing]);
+    }
+  }, [sources, substances, allSubstances]);
+
+  // Карточки после фильтра поиска. Сохраняем исходный индекс i — все
+  // обработчики (onChange, onRemove, ...) работают по индексу в sources.
+  const filteredSources = useMemo(() => {
+    const items = sources.map((src, i) => ({ src, i }));
+    const q = sourceFilter.trim().toLowerCase();
+    if (!q) return items;
+    return items.filter(({ src, i }) =>
+      (src.name || "").toLowerCase().includes(q) || String(i + 1) === q
+    );
+  }, [sources, sourceFilter]);
+
   // Substance editor modal
   const [showSubstanceEditor, setShowSubstanceEditor] = useState(false);
   // Enterprise boundary editor modal
@@ -214,7 +260,7 @@ export default function App() {
   // displayedResult — то, что реально показывается на карте и в панели результатов.
   // Если есть многовеществный расчёт (by_substance), берём данные для выбранного
   // displaySubstanceCode. Иначе используем плоские поля результата.
-  const displayedResult = (() => {
+  const displayedResult = useMemo(() => {
     if (!result) return null;
     if (Array.isArray(result.by_substance) && result.by_substance.length > 0) {
       const code = displaySubstanceCode || result.primary_code;
@@ -234,7 +280,7 @@ export default function App() {
       }
     }
     return result;
-  })();
+  }, [result, displaySubstanceCode]);
 
   // Центроид всех контуров предприятия (по всем точкам) — null если пусто
   const enterpriseCentroid = (() => {
@@ -433,10 +479,11 @@ export default function App() {
     setSources((prev) => prev.map((src) => ({ ...src, lat: cLat, lon: cLon })));
   };
 
-  const handleSourceDrag = (index, lat, lon) => {
-    handleSourceChange(index, "lat", lat);
-    handleSourceChange(index, "lon", lon);
-  };
+  // Стабильная ссылка + одно обновление стейта: маркеры на карте мемоизированы
+  // и не должны пересоздаваться из-за новой функции на каждый рендер.
+  const handleSourceDrag = useCallback((index, lat, lon) => {
+    setSources((prev) => prev.map((src, i) => (i === index ? { ...src, lat, lon } : src)));
+  }, []);
 
   // Добавление пользовательского вещества
   const handleAddCustomSubstance = useCallback((substance) => {
@@ -465,9 +512,11 @@ export default function App() {
     }
   };
 
-  // Сохранение проекта в JSON
+  // Сохранение проекта в JSON. customSubstances кладём в файл, чтобы проект
+  // был самодостаточным: на другой машине справочник может не знать
+  // добавленных вручную веществ.
   const handleSaveProject = () => {
-    const project = { sources, meteo, grid, selectedSubstance, enterprise };
+    const project = { sources, meteo, grid, selectedSubstance, enterprise, customSubstances };
     const blob = new Blob([JSON.stringify(project, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -494,6 +543,17 @@ export default function App() {
           if (project.grid) setGrid(project.grid);
           if (project.selectedSubstance) setSelectedSubstance(project.selectedSubstance);
           if (project.enterprise) setEnterprise(migrateEnterprise(project.enterprise));
+          // Вещества, сохранённые вместе с проектом, добавляем в пользовательский
+          // справочник (без дублей по коду).
+          if (Array.isArray(project.customSubstances) && project.customSubstances.length > 0) {
+            setCustomSubstances((prev) => {
+              const known = new Set([...substances, ...prev].map((s) => String(s.code)));
+              const added = project.customSubstances.filter(
+                (s) => s?.code && !known.has(String(s.code))
+              );
+              return added.length > 0 ? [...prev, ...added] : prev;
+            });
+          }
         } catch {
           setError("Ошибка чтения файла проекта");
         }
@@ -732,6 +792,12 @@ export default function App() {
                 style={{ fontSize: 12 }}
               >
                 <option value="">-- {t.selectSubstance} --</option>
+                {/* Вещество из загруженного проекта, которого нет в справочнике */}
+                {selectedSubstance?.code && !allSubstances.some((s) => String(s.code) === String(selectedSubstance.code)) && (
+                  <option value={selectedSubstance.code}>
+                    {selectedSubstance.code} — {selectedSubstance.name} (ПДК: {selectedSubstance.pdk_mr ?? "—"})
+                  </option>
+                )}
                 {allSubstances.map((s) => (
                   <option key={s.code} value={s.code}>
                     {s.code} — {s.name} (ПДК: {s.pdk_mr ?? "—"})
@@ -806,7 +872,19 @@ export default function App() {
                 <button className="btn-secondary btn-sm" style={{ width: "100%", marginTop: 6 }} onClick={handleAddSource}>
                   {t.addSource}
                 </button>
-                {sources.map((src, i) => (
+                {sources.length > COLLAPSE_THRESHOLD && (
+                  <input
+                    type="text"
+                    placeholder="🔍 Поиск источника (название или №)"
+                    value={sourceFilter}
+                    onChange={(e) => {
+                      setSourceFilter(e.target.value);
+                      setVisibleCards(CARDS_PAGE);
+                    }}
+                    style={{ width: "100%", marginTop: 6, fontSize: 12, padding: "5px 8px", boxSizing: "border-box" }}
+                  />
+                )}
+                {filteredSources.slice(0, visibleCards).map(({ src, i }) => (
                   <SourceForm
                     key={i}
                     source={src}
@@ -819,9 +897,19 @@ export default function App() {
                     onPickFromMap={handlePickFromMap}
                     substances={allSubstances}
                     onAddCustomSubstance={handleAddCustomSubstance}
+                    defaultCollapsed={sources.length > COLLAPSE_THRESHOLD}
                     t={t}
                   />
                 ))}
+                {filteredSources.length > visibleCards && (
+                  <button
+                    className="btn-secondary btn-sm"
+                    style={{ width: "100%", marginTop: 6, fontSize: 11 }}
+                    onClick={() => setVisibleCards((c) => c + CARDS_PAGE)}
+                  >
+                    Показать ещё {Math.min(CARDS_PAGE, filteredSources.length - visibleCards)} (показано {visibleCards} из {filteredSources.length})
+                  </button>
+                )}
               </>
             ) : (
               <>

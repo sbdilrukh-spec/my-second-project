@@ -1,4 +1,8 @@
-import React, { useCallback, useRef } from "react";
+import React, { useCallback, useRef, useState } from "react";
+
+// Порция строк таблицы: при сотнях источников рендерить всю таблицу сразу
+// нельзя — тысячи инпутов замораживают интерфейс.
+const ROWS_PAGE = 100;
 
 const COLUMNS = [
   { key: "name", label: "Название", type: "text", width: 120 },
@@ -12,6 +16,7 @@ const COLUMNS = [
 
 export default function TableInput({ sources, onChange, onAdd, onRemove, t }) {
   const tableRef = useRef(null);
+  const [visibleRows, setVisibleRows] = useState(ROWS_PAGE);
 
   const handleCellChange = useCallback((rowIdx, key, value) => {
     const col = COLUMNS.find((c) => c.key === key);
@@ -92,7 +97,7 @@ export default function TableInput({ sources, onChange, onAdd, onRemove, t }) {
             </tr>
           </thead>
           <tbody>
-            {sources.map((src, i) => (
+            {sources.slice(0, visibleRows).map((src, i) => (
               <tr key={i}>
                 <td style={tdStyle}>{i + 1}</td>
                 {COLUMNS.map((col) => {
@@ -127,6 +132,15 @@ export default function TableInput({ sources, onChange, onAdd, onRemove, t }) {
           </tbody>
         </table>
       </div>
+      {sources.length > visibleRows && (
+        <button
+          className="btn-secondary btn-sm"
+          style={{ width: "100%", marginTop: 6, fontSize: 11 }}
+          onClick={() => setVisibleRows((v) => v + ROWS_PAGE)}
+        >
+          Показать ещё {Math.min(ROWS_PAGE, sources.length - visibleRows)} строк (показано {visibleRows} из {sources.length})
+        </button>
+      )}
       <div style={{ marginTop: 6, fontSize: 11, color: "#64748b" }}>
         Ctrl+V — вставить данные из Excel (столбцы: Название, H, D, w0, Tг, M г/с, т/год)
       </div>

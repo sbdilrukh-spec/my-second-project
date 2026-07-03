@@ -60,12 +60,17 @@ function SourceForm({
   onPickFromMap,
   substances,
   onAddCustomSubstance,
+  defaultCollapsed = false,
   t,
 }) {
   const [showAddForm, setShowAddForm] = useState(null); // emIdx или null
   const [newSubstance, setNewSubstance] = useState({
     name: "", code: "", pdk_mr: "", pdk_ss: "", hazard_class: "",
   });
+  // В больших проектах карточки свёрнуты по умолчанию: полная карточка — это
+  // сотни DOM-узлов (селект веществ ~170 опций на каждый выброс), и рендерить
+  // так сотни источников сразу нельзя.
+  const [collapsed, setCollapsed] = useState(defaultCollapsed);
 
   const stackField = (key, label, type = "number", step = "any") => (
     <div className="field-row">
@@ -121,6 +126,30 @@ function SourceForm({
     ? source.emissions
     : [{ ...EMISSION_DEFAULT }];
 
+  // Свёрнутая карточка — компактная строка-заголовок, клик разворачивает
+  if (collapsed) {
+    return (
+      <div
+        className="source-card"
+        style={{ padding: "6px 8px", cursor: "pointer" }}
+        onClick={() => setCollapsed(false)}
+        title="Развернуть карточку"
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
+          <span style={{
+            fontSize: 12, fontWeight: 600, color: "#1E293B",
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+          }}>
+            {index + 1}. {source.name || `Источник ${index + 1}`}
+          </span>
+          <span style={{ fontSize: 10, color: "#64748b", flexShrink: 0 }}>
+            {source.type === "area" ? "площадной" : `H=${source.height ?? "—"}м`} · {emissions.length} в-в ▸
+          </span>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="source-card">
       <div className="source-header">
@@ -130,6 +159,14 @@ function SourceForm({
           value={source.name}
           onChange={(e) => onChange(index, "name", e.target.value)}
         />
+        <button
+          className="btn-secondary btn-sm"
+          onClick={() => setCollapsed(true)}
+          title="Свернуть карточку"
+          style={{ flexShrink: 0, padding: "2px 7px" }}
+        >
+          ▴
+        </button>
         <button className="btn-danger btn-sm" onClick={() => onRemove(index)}>
           {t.removeSource}
         </button>
@@ -266,6 +303,13 @@ function SourceForm({
                 style={{ fontSize: 11 }}
               >
                 <option value="">— {t.selectSubstance} —</option>
+                {/* Вещество из загруженного проекта, которого нет в справочнике:
+                    без этой опции селект показывал бы пустое значение */}
+                {em.substance?.code && !substances.some((s) => String(s.code) === String(em.substance.code)) && (
+                  <option value={em.substance.code}>
+                    {em.substance.code} — {em.substance.name} (ПДК: {em.substance.pdk_mr ?? "—"})
+                  </option>
+                )}
                 {substances.map((s) => (
                   <option key={s.code} value={s.code}>
                     {s.code} — {s.name} (ПДК: {s.pdk_mr ?? "—"})
