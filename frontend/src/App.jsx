@@ -936,11 +936,20 @@ export default function App() {
                 const cols = Math.ceil(Math.sqrt(imported.length));
 
                 // Находит вещество по коду или названию из импорта.
-                // Сначала по коду (точное совпадение), потом по названию (case-insensitive).
+                // Сначала по коду (точное совпадение), затем без учёта ведущих
+                // нулей — Excel превращает код "0301" в число 301, срезая нули, —
+                // потом по названию (case-insensitive).
+                const normCode = (c) => String(c ?? "").trim().toLowerCase().replace(/\.0+$/, "");
+                const stripZeros = (s) => s.replace(/^0+(?=.)/, "");
                 const findSubstance = (code, name) => {
-                  if (code) {
-                    const byCode = allSubstances.find(s => String(s.code) === String(code));
+                  const q = normCode(code);
+                  if (q) {
+                    const byCode = allSubstances.find(s => normCode(s.code) === q);
                     if (byCode) return byCode;
+                    const byCodeNoZeros = allSubstances.find(
+                      s => stripZeros(normCode(s.code)) === stripZeros(q)
+                    );
+                    if (byCodeNoZeros) return byCodeNoZeros;
                   }
                   if (name) {
                     const lcName = String(name).trim().toLowerCase();

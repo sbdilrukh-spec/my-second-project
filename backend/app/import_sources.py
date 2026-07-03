@@ -193,7 +193,15 @@ def parse_excel(file_bytes: bytes) -> List[Dict[str, Any]]:
             if header == "name":
                 source[header] = str(val).strip() if val else None
             elif header in ("substance_code", "substance_name"):
-                source[header] = str(val).strip() if val else None
+                # Excel часто хранит код вещества числом: "0301" → 301 или 301.0.
+                # Возвращаем строку без ".0"; ведущие нули восстановить нельзя —
+                # их учитывает сопоставление на фронтенде.
+                if val is None or val == "":
+                    source[header] = None
+                elif isinstance(val, float) and val.is_integer():
+                    source[header] = str(int(val))
+                else:
+                    source[header] = str(val).strip()
             elif header in NUMERIC_FIELDS:
                 if val is None or val == "":
                     source[header] = None

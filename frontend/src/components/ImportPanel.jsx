@@ -44,7 +44,9 @@ export default function ImportPanel({ onImport, t }) {
   const handleDownloadTemplate = () => {
     const a = document.createElement("a");
     a.href = "/api/import/template";
-    a.download = "template_sources.csv";
+    // Сервер отдаёт Excel-шаблон: расширение обязано быть .xlsx, иначе
+    // при обратном импорте файл уйдёт в CSV-парсер и сломается.
+    a.download = "template_sources.xlsx";
     a.click();
   };
 
