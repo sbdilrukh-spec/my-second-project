@@ -37,6 +37,17 @@ export function createDefaultSource(cityLat, cityLon, idx) {
 // в новую с массивом emissions. Идемпотентна.
 export function migrateSource(s) {
   if (!s) return s;
+  // Площадной источник без размеров (сохранён до фикса материализации полей):
+  // заполняем дефолты, иначе бэкенд молча считает его точечным.
+  if (s.type === "area" && !(s.area_length > 0 && s.area_width > 0)) {
+    s = {
+      ...s,
+      area_length: s.area_length || 200,
+      area_width: s.area_width || 100,
+      area_angle: s.area_angle ?? 0,
+      area_subdivisions: s.area_subdivisions || 5,
+    };
+  }
   if (Array.isArray(s.emissions) && s.emissions.length > 0) return s;
   // Ensure type field for backward compatibility
   const type = s.type || "stack";
