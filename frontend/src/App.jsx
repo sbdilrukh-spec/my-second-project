@@ -317,6 +317,20 @@ export default function App() {
     setSources((prev) =>
       prev.map((src, i) => {
         if (i !== index) return src;
+        // Переключение на площадной тип: материализуем размеры площадки.
+        // У источников из импорта/старых проектов полей area_* нет вообще;
+        // форма показывает подстановку "200×100", но в данных пусто — бэкенд
+        // молча считал такой источник точечным.
+        if (key === "type" && value === "area") {
+          return {
+            ...src,
+            type: "area",
+            area_length: src.area_length || 200,
+            area_width: src.area_width || 100,
+            area_angle: src.area_angle ?? 0,
+            area_subdivisions: src.area_subdivisions || 5,
+          };
+        }
         if (LEGACY_KEYS.has(key)) {
           const ems = Array.isArray(src.emissions) && src.emissions.length > 0
             ? [...src.emissions]
