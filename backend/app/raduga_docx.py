@@ -26,7 +26,7 @@ FONT_SIZE = 7          # пт: строка таблицы 8 «Радуги» �
 LINE_PITCH = 8         # пт, точный межстрочный интервал
 T7_ROWS_PER_PAGE = 45
 T12_COLS = 6           # точек по X в одном блоке таблицы 12
-T12_ROWS = 19          # строк Y на странице таблицы 12
+T12_ROWS = 21          # строк Y на странице таблицы 12 (21 строка = сетка 10 км / 500 м)
 
 SEP_T1 = "-" * 62
 SEP_T7 = "-" * 116
@@ -206,18 +206,22 @@ def _table12_pages(obj, sub_name, grid):
     """
     xs = sorted({k[0] for k in grid})
     ys = sorted({k[1] for k in grid}, reverse=True)
+    # Строки Y делим между страницами поровну: 21 строка → 11 + 10, а не
+    # 19 + 2 (страница из двух строк выглядит как недозаполненная таблица).
+    n_pages_y = max(1, math.ceil(len(ys) / T12_ROWS))
+    rows_per_page = math.ceil(len(ys) / n_pages_y) if ys else T12_ROWS
     pages = []
     page_no = 0
     for xs_start in range(0, len(xs), T12_COLS):
         chunk = xs[xs_start:xs_start + T12_COLS]
-        for ys_start in range(0, len(ys), T12_ROWS):
+        for ys_start in range(0, len(ys), rows_per_page):
             page_no += 1
             lines = list(_T12_LEGEND) + [
                 f"Объект:    {obj}",
                 f"           вещество: {sub_name}".ljust(95) + f"Таблица 12 Cтраница {page_no:2d}",
                 SEP_T12,
             ]
-            for y in ys[ys_start:ys_start + T12_ROWS]:
+            for y in ys[ys_start:ys_start + rows_per_page]:
                 qh_cells = hb_cells = ""
                 for x in chunk:
                     qh, hb, u = grid.get((x, y), (0.0, 0, 0.0))
@@ -339,7 +343,10 @@ def build_tables(request_data: dict, result_data: dict, coef_a: float) -> list:
         e["ty"] = sum(x["ty"] for x in e["entries"])
     pages.append(_table8(obj, list(subs8.values())))
 
-    # --- Таблицы 12 и 13 по каждому веществу ---
+    # --- Таблицы 12 и 13: сначала все таблицы 12 по веществам, затем все
+    # таблицы 13 (как в распечатке «Радуги»; часть таблиц 12 в отчёт не идёт,
+    # и их удобно вырезать одним блоком) ---
+    cells_by_sub = []
     for sub in by_subs:
         code, name = _sub_meta(sub)
         pdk = _f(sub.get("pdk"), 0.5) or 0.5
@@ -347,8 +354,10 @@ def build_tables(request_data: dict, result_data: dict, coef_a: float) -> list:
         for p in sub["points"]:
             x, y = gxy.node(p["lat"], p["lon"])
             cells[(x, y)] = (_f(p.get("c")) / pdk, _hb(p.get("d")), _f(p.get("u")))
+        cells_by_sub.append((sub, name, cells))
         pages += _table12_pages(obj, name, cells)
 
+    for sub, name, cells in cells_by_sub:
         qhs = [v[0] for v in cells.values()]
         top_rows = []
         for tp in sub.get("top_points") or []:
@@ -385,7 +394,10 @@ def generate_raduga_docx(request_data: dict, result_data: dict, coef_a: float = 
     section = doc.sections[0]
     section.page_width, section.page_height = Cm(21.0), Cm(29.7)
     section.left_margin = section.right_margin = Cm(1.5)
-    section.top_margin = section.bottom_margin = Cm(1.5)
+    # Верх/низ 1,0 см: так на лист входит 21 строка Y таблицы 12
+    # (13 строк шапки + 21·4 = 97 строк по 8 пт = 27,4 см из 27,7 см).
+    section.top_margin = section.bottom_margin = Cm(1.0)
+    section.header_distance = section.footer_distance = Cm(0.5)
 
     style = doc.styles["Normal"]
     style.font.name = FONT
