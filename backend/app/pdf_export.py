@@ -13,6 +13,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from .ond86 import source_number
+
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.pagesizes import A3, A4, landscape, portrait
@@ -178,58 +180,49 @@ def _make_concentration_plot(points_data: list, grid_step: float = 500,
     aspect = y_range / x_range if x_range > 0 else 1.0
     fig_w = max(8, min(16, n_x * 0.5 + 2))
     fig_h = max(6, fig_w * aspect)
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
 
     font_size = max(4, min(8, int(fig_w / n_x * 10))) if n_x > 0 else 6
 
+    # Заливка ячеек одним слоем pcolormesh (раньше — отдельный Rectangle на
+    # каждую ячейку: тысячи объектов matplotlib, экспорт шёл десятки секунд).
+    ratio_arr = grid_arr / max_c if max_c > 0 else np.zeros_like(grid_arr)
+    max_mask = (np.abs(grid_arr - max_c) < max_c * 0.001) & (grid_arr > 0)
+    empty_rgba = (0.0, 0.0, 0.0, 0.0) if transparent else to_rgba("#FFFFFF")
+    cell_rgba = np.empty((n_y, n_x, 4))
+    cell_rgba[...] = empty_rgba
+    for mask, base in (
+        (ratio_arr > 0.05, "#FFFFDD"),
+        (ratio_arr > 0.3, "#FFFF99"),
+        (ratio_arr > 0.7, "#FFCC66"),
+        (max_mask, "#FF9999"),
+    ):
+        cell_rgba[mask] = to_rgba(base, cell_alpha)
+    ux = np.asarray(unique_x, dtype=float)
+    uy = np.asarray(unique_y, dtype=float)
+    x_edges = np.concatenate([[ux[0] - grid_step / 2], (ux[:-1] + ux[1:]) / 2, [ux[-1] + grid_step / 2]])
+    y_edges = np.concatenate([[uy[0] - grid_step / 2], (uy[:-1] + uy[1:]) / 2, [uy[-1] + grid_step / 2]])
+    mesh = ax.pcolormesh(x_edges, y_edges, np.zeros((n_y, n_x)), shading="flat",
+                         edgecolors="#555555", linewidth=0.4)
+    mesh.set_array(None)
+    mesh.set_facecolor(cell_rgba.reshape(-1, 4))
+
+    # Подписи значений (адаптивный формат для долей ПДК). Рисуются не через
+    # ax.text, а поверх растра в _save_with_cell_labels: тысяча Text-объектов
+    # matplotlib — основная задержка экспорта сетки.
+    cell_labels = []
     for yi, y_val in enumerate(unique_y):
         for xi, x_val in enumerate(unique_x):
             c_val = grid_arr[yi, xi]
-            ratio = c_val / max_c if max_c > 0 else 0
-            is_max = abs(c_val - max_c) < max_c * 0.001 and c_val > 0
-
-            # Цвет фона ячейки
-            if is_max:
-                base = "#FF9999"
-            elif ratio > 0.7:
-                base = "#FFCC66"
-            elif ratio > 0.3:
-                base = "#FFFF99"
-            elif ratio > 0.05:
-                base = "#FFFFDD"
+            if c_val <= 0:
+                continue
+            if c_val >= 10:
+                txt = f"{c_val:.1f}"
+            elif c_val >= 1:
+                txt = f"{c_val:.2f}"
             else:
-                base = None  # пустая ячейка
-
-            if base is None:
-                # На прозрачном фоне пустые ячейки полностью прозрачны
-                # (видна подложка), в PDF — белые.
-                fc = "none" if transparent else "#FFFFFF"
-            else:
-                fc = to_rgba(base, cell_alpha) if transparent else base
-
-            rect = plt.Rectangle(
-                (x_val - grid_step / 2, y_val - grid_step / 2),
-                grid_step, grid_step,
-                facecolor=fc, edgecolor="#555555", linewidth=0.4,
-            )
-            ax.add_patch(rect)
-
-            if c_val > 0:
-                # Адаптивный формат для долей ПДК: для крупных чисел меньше
-                # знаков после запятой, иначе 4 знака для тонкой детализации.
-                if c_val >= 10:
-                    txt = f"{c_val:.1f}"
-                elif c_val >= 1:
-                    txt = f"{c_val:.2f}"
-                else:
-                    txt = f"{c_val:.4f}"
-                ax.text(
-                    x_val, y_val, txt,
-                    ha="center", va="center", fontsize=font_size,
-                    fontweight="bold" if is_max else "normal",
-                    color="#CC0000" if is_max else "#000000",
-                )
-
+                txt = f"{c_val:.4f}"
+            cell_labels.append((x_val, y_val, txt, bool(max_mask[yi, xi])))
     ax.set_xlim(unique_x[0] - grid_step / 2, unique_x[-1] + grid_step / 2)
     ax.set_ylim(unique_y[0] - grid_step / 2, unique_y[-1] + grid_step / 2)
     ax.set_aspect("equal")
@@ -277,7 +270,10 @@ def _make_concentration_plot(points_data: list, grid_step: float = 500,
         ax.text(sx, sy, str(idx + 1), ha="center", va="center",
                 fontsize=font_size + 1, color="#fff", fontweight="bold", zorder=7)
 
-    ax.set_title(title, fontsize=11, fontweight="bold")
+    if not transparent:
+        # Для CorelDraw заголовок не нужен (имя вещества — в имени файла), а его
+        # ширина меняла бы размер PNG от вещества к веществу.
+        ax.set_title(title, fontsize=11, fontweight="bold")
     # Маленькая поясняющая надпись, в каких единицах значения в ячейках
     ax.text(
         0.5, -0.06,
@@ -303,10 +299,56 @@ def _make_concentration_plot(points_data: list, grid_step: float = 500,
             color="#000", linewidth=1.5, zorder=4)
 
     fig.subplots_adjust(left=0.12, right=0.95, bottom=0.12, top=0.92)
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight",
-                pad_inches=0.3, transparent=transparent)
+    buf = _save_with_cell_labels(fig, ax, cell_labels, font_size, dpi, transparent)
     plt.close(fig)
+    return buf
+
+
+def _save_with_cell_labels(fig, ax, labels, font_size, dpi, transparent,
+                           pad_inches=0.3) -> io.BytesIO:
+    """
+    Растр фигуры + подписи ячеек, нарисованные PIL прямо по пикселям, затем
+    обрезка по содержимому (как bbox_inches="tight"). Эквивалент ax.text +
+    savefig, но в десятки раз быстрее на сетках в сотни/тысячи ячеек.
+    """
+    from PIL import Image, ImageDraw, ImageFont
+    from matplotlib import font_manager
+
+    if transparent:
+        fig.patch.set_alpha(0.0)
+        ax.patch.set_alpha(0.0)
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    img = Image.fromarray(np.asarray(fig.canvas.buffer_rgba()).copy(), "RGBA")
+    height = img.height
+
+    size_px = max(6, int(round(font_size * dpi / 72.0)))
+    regular = ImageFont.truetype(font_manager.findfont("DejaVu Sans"), size_px)
+    bold = ImageFont.truetype(
+        font_manager.findfont(font_manager.FontProperties(family="DejaVu Sans", weight="bold")),
+        size_px,
+    )
+    draw = ImageDraw.Draw(img)
+    if labels:
+        pts = ax.transData.transform(np.array([(x, y) for x, y, _, _ in labels], dtype=float))
+        for (px, py), (_, _, txt, is_max) in zip(pts, labels):
+            draw.text((px, height - py), txt, anchor="mm",
+                      font=bold if is_max else regular,
+                      fill=(204, 0, 0, 255) if is_max else (0, 0, 0, 255))
+
+    # Обрезка как у bbox_inches="tight" (подписи ячеек внутри осей, на неё не влияют)
+    bbox = fig.get_tightbbox(renderer)
+    x0 = max(0, int((bbox.x0 - pad_inches) * dpi))
+    x1 = min(img.width, int(np.ceil((bbox.x1 + pad_inches) * dpi)))
+    y0 = max(0, int(height - (bbox.y1 + pad_inches) * dpi))
+    y1 = min(height, int(np.ceil(height - (bbox.y0 - pad_inches) * dpi)))
+    img = img.crop((x0, y0, x1, y1))
+    if not transparent:
+        background = Image.new("RGBA", img.size, (255, 255, 255, 255))
+        img = Image.alpha_composite(background, img).convert("RGB")
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", compress_level=3, dpi=(dpi, dpi))
     buf.seek(0)
     return buf
 
@@ -479,366 +521,13 @@ def _make_polar_plot(points_data: list, sources: list = None,
     return buf
 
 
-# Единственный источник правды по соответствию «уровень ПДК → цвет».
-# Используется и для contourf-заливки, и для легенды в PDF/PNG.
-_PDK_LEVELS = [
-    (0.01, "#DBEAFE", "0,01 ПДК"),
-    (0.05, "#93C5FD", "0,05 ПДК"),
-    (0.1,  "#3B82F6", "0,1 ПДК"),
-    (0.2,  "#14B8A6", "0,2 ПДК"),
-    (0.3,  "#22C55E", "0,3 ПДК"),
-    (0.5,  "#A3E635", "0,5 ПДК"),
-    (0.6,  "#FACC15", "0,6 ПДК"),
-    (0.8,  "#F97316", "0,8 ПДК"),
-    (1.0,  "#DC2626", "1,0 ПДК"),
-    (2.0,  "#991B1B", "2,0 ПДК"),
-    (5.0,  "#581C87", "5,0+ ПДК"),
-]
-# Соответствие для текстовой легенды в PDF (label → color).
-_PDK_COLOR_MAP = [(label, color) for _, color, label in _PDK_LEVELS]
+class _SrcView:
+    """dict источника → атрибуты number/name для source_number."""
 
+    def __init__(self, d):
+        self.number = d.get("number")
+        self.name = d.get("name")
 
-def _color_legend_html(present_levels=None) -> str:
-    """HTML для ReportLab Paragraph: цветной квадрат + подпись уровня.
-    Используем простой `<font color>` (а не `backColor`) — он легче
-    разбирается ReportLab и не валит сборку PDF на длинных строках.
-    Если передан present_levels — выводим только эти уровни.
-    """
-    parts = []
-    for label, color in _PDK_COLOR_MAP:
-        if present_levels is not None and label not in present_levels:
-            continue
-        # ■ — заполненный квадрат, прокрашен цветом уровня. Подпись — обычным.
-        parts.append(f'<font color="{color}" size="11">■</font>&nbsp;{label}')
-    return "&nbsp;&nbsp;".join(parts)
-
-
-# ---------------------------------------------------------------------------
-# Прозрачная карта рассеивания — для наложения в CorelDraw на свою подложку
-# ---------------------------------------------------------------------------
-
-def _make_transparent_dispersion_map(
-    points_data: list,
-    sources: list = None,
-    boundary: list = None,
-    boundaries: list = None,
-    pdk: float = 0.5,
-    substance_name: str = "",
-    show_axes: bool = False,
-    show_title: bool = False,
-    grid_data: dict = None,
-):
-    """
-    Рендерит карту рассеивания на прозрачном фоне:
-      - изолинии в долях ПДК с подписями
-      - заливка между уровнями (полупрозрачная)
-      - источники как пронумерованные кружки
-      - контур площадки как оранжевая линия
-      - изолиния 1.0 ПДК — выделена
-    Без осей и заголовка по умолчанию — для наложения в CorelDraw.
-    Возвращает io.BytesIO с PNG.
-    """
-    if not points_data:
-        return None
-
-    lats = np.array([p["lat"] for p in points_data])
-    lons = np.array([p["lon"] for p in points_data])
-    conc = np.array([p["c"] for p in points_data])
-
-    # Размеры расчётной сетки в метрах
-    if grid_data:
-        x_length = float(grid_data.get("x_length", 7000))
-        y_length = float(grid_data.get("y_length", 7000))
-        grid_step = float(grid_data.get("step", 500))
-    else:
-        x_length = 7000.0
-        y_length = 7000.0
-        grid_step = 500.0
-
-    # Левый-нижний угол сетки в географических координатах
-    origin_lat = float(np.min(lats))
-    origin_lon = float(np.min(lons))
-    lat_rad = origin_lat * np.pi / 180.0
-
-    # Точки сетки → метры от origin
-    dx_e = (lons - origin_lon) * 111_000.0 * np.cos(lat_rad)
-    dy_n = (lats - origin_lat) * 111_000.0
-
-    # Регулярная 2D-сетка для contour/contourf
-    n_x = int(round(x_length / grid_step)) + 1
-    n_y = int(round(y_length / grid_step)) + 1
-    xi = np.linspace(0.0, x_length, n_x)
-    yi = np.linspace(0.0, y_length, n_y)
-    XI, YI = np.meshgrid(xi, yi)
-    ZI = np.zeros((n_y, n_x))
-    for x_m, y_m, c_v in zip(dx_e, dy_n, conc):
-        ix = int(round(x_m / grid_step))
-        iy = int(round(y_m / grid_step))
-        if 0 <= ix < n_x and 0 <= iy < n_y:
-            ZI[iy, ix] = c_v
-
-    # Концентрация в долях ПДК
-    if pdk and pdk > 0:
-        Z_pdk = ZI / pdk
-    else:
-        Z_pdk = ZI
-    z_max = float(Z_pdk.max())
-    if z_max <= 0:
-        return None
-
-    # Уровни изолиний по ТЗ
-    iso_levels = [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 0.6, 0.8, 1.0, 2.0, 5.0]
-    iso_levels = [lv for lv in iso_levels if lv <= z_max * 1.1 and lv > 0]
-    if len(iso_levels) < 2:
-        iso_levels = [z_max * 0.3, z_max * 0.6, z_max] if z_max > 0 else [0.5, 1.0]
-
-    # Размер фигуры пропорционален сетке
-    aspect = y_length / x_length if x_length > 0 else 1.0
-    fig_w = 12
-    fig_h = max(4, fig_w * aspect)
-
-    # Фон: белый только для PDF (когда показываем оси), прозрачный для CorelDraw
-    fig_face = "white" if show_axes else "none"
-    ax_face = "white" if show_axes else "none"
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h), facecolor=fig_face)
-    ax.set_facecolor(ax_face)
-
-    # Радужная палитра — единый источник правды _PDK_LEVELS на уровне модуля.
-    # Идёт от холодного (низкие концентрации) к горячему (превышение).
-    fill_colors_full = [color for _, color, _ in _PDK_LEVELS]
-    # iso_levels уже отфильтрован под фактический диапазон концентраций.
-    # Берём столько цветов, сколько реально интервалов в fill_levels.
-    fill_levels = [0.0] + list(iso_levels)
-    cf = ax.contourf(
-        XI, YI, Z_pdk, levels=fill_levels,
-        colors=fill_colors_full[:len(fill_levels) - 1],
-        alpha=0.55, extend="max",
-    )
-
-    # Все линии изолиний — без подписей (тонкие, для густоты картинки)
-    cl_all = ax.contour(
-        XI, YI, Z_pdk, levels=iso_levels,
-        colors="#7F1D1D", linewidths=0.9, alpha=0.95,
-    )
-
-    # Подписываем только «ключевые» уровни — реже, читабельнее
-    KEY_LEVELS = {0.1, 0.2, 0.3, 0.5, 1.0, 2.0, 5.0}
-    label_levels = [lv for lv in iso_levels if any(abs(lv - k) < 1e-6 for k in KEY_LEVELS)]
-    # Если ключевых нет в наборе (поле слишком слабое) — подпишем хотя бы максимальную
-    if not label_levels:
-        label_levels = [iso_levels[-1]]
-
-    try:
-        labels = ax.clabel(
-            cl_all,
-            levels=label_levels,
-            inline=True,
-            fontsize=12,
-            fmt=lambda v: f"{v:g} ПДК",
-            inline_spacing=8,
-        )
-    except TypeError:
-        # Старые matplotlib без аргумента levels — фолбэк
-        labels = ax.clabel(cl_all, inline=True, fontsize=12, fmt=lambda v: f"{v:g} ПДК")
-
-    # Белая обводка текста, чтобы читалось и на цветной заливке
-    try:
-        import matplotlib.patheffects as pe
-        for lab in labels or []:
-            lab.set_path_effects([
-                pe.Stroke(linewidth=3, foreground="white"),
-                pe.Normal(),
-            ])
-    except Exception:
-        pass
-
-    # Изолиния 1,0 ПДК — выделена толстой красной + крупной подписью
-    if any(abs(lv - 1.0) < 1e-6 for lv in iso_levels):
-        cl_one = ax.contour(
-            XI, YI, Z_pdk, levels=[1.0],
-            colors="#DC2626", linewidths=2.6,
-        )
-        try:
-            one_labels = ax.clabel(cl_one, inline=True, fontsize=13, fmt=lambda v: "1,0 ПДК")
-            import matplotlib.patheffects as pe2
-            for lab in one_labels or []:
-                lab.set_fontweight("bold")
-                lab.set_path_effects([
-                    pe2.Stroke(linewidth=3.5, foreground="white"),
-                    pe2.Normal(),
-                ])
-        except Exception:
-            pass
-
-    # Источники в карте рассеивания не отображаем — пользователь
-    # просил убрать пронумерованные кружки. Контур площадки остаётся.
-    _ = sources  # параметр оставляем в сигнатуре для совместимости
-
-    # Контуры площадок — каждый отдельной оранжевой линией (не соединяются).
-    contours = boundaries if boundaries else ([boundary] if boundary else [])
-    for contour in contours:
-        if not contour or len(contour) < 2:
-            continue
-        bx, by = [], []
-        for p in contour:
-            try:
-                bx.append((float(p["lon"]) - origin_lon) * 111_000.0 * np.cos(lat_rad))
-                by.append((float(p["lat"]) - origin_lat) * 111_000.0)
-            except (KeyError, TypeError, ValueError):
-                continue
-        if len(bx) >= 3:
-            bx.append(bx[0])
-            by.append(by[0])
-        if len(bx) >= 2:
-            ax.plot(bx, by, color="#EA580C", linewidth=2.0,
-                    solid_capstyle="round", zorder=8)
-
-    # ── Линейка масштаба — только в PNG для CorelDraw (show_axes=False) ─────
-    # В PDF (show_axes=True) масштаб даёт сама координатная сетка с подписями.
-    if not show_axes:
-        scale_candidates = [50, 100, 200, 250, 500, 1000, 2000, 5000, 10000]
-        target_len = x_length * 0.20
-        bar_len = scale_candidates[0]
-        for c in scale_candidates:
-            if c <= target_len:
-                bar_len = c
-        bar_x0 = x_length * 0.04
-        bar_y0 = y_length * 0.05
-        bar_h = y_length * 0.008
-        ax.add_patch(plt.Rectangle(
-            (bar_x0 - bar_len * 0.005, bar_y0 - bar_h * 0.5),
-            bar_len * 1.01, bar_h * 2.0,
-            facecolor="white", edgecolor="black", linewidth=0.8, zorder=12,
-        ))
-        ax.add_patch(plt.Rectangle(
-            (bar_x0, bar_y0), bar_len, bar_h,
-            facecolor="black", edgecolor="black", linewidth=0.5, zorder=13,
-        ))
-        ax.add_patch(plt.Rectangle(
-            (bar_x0 + bar_len / 2, bar_y0), bar_len / 2, bar_h,
-            facecolor="white", edgecolor="black", linewidth=0.5, zorder=14,
-        ))
-        if bar_len >= 1000:
-            labels_text = [(0, "0"), (bar_len / 2, f"{int(bar_len/2)} м"), (bar_len, f"{int(bar_len)} м")]
-        else:
-            labels_text = [(0, "0"), (bar_len / 2, f"{int(bar_len/2)}"), (bar_len, f"{int(bar_len)} м")]
-        for x_off, txt in labels_text:
-            ax.text(
-                bar_x0 + x_off, bar_y0 + bar_h * 2.5, txt,
-                ha="center", va="bottom", fontsize=11, fontweight="bold",
-                color="black", zorder=15,
-            )
-
-        # ── Цветовая легенда — правый-нижний угол. Только для PNG.
-        # Показываем только те уровни, что фактически есть на карте (iso_levels).
-        if iso_levels:
-            present = []
-            for lv in iso_levels:
-                color = next((c for v, c, _ in _PDK_LEVELS if abs(v - lv) < 1e-6), None)
-                if color is None:
-                    continue
-                present.append((lv, color, f"{lv:g}"))
-
-            if present:
-                n = len(present)
-                # Размер ячейки — в долях ширины/высоты осей (transAxes).
-                cell_w = 0.038 if n <= 11 else 0.034
-                cell_h = 0.028
-                legend_w = cell_w * n
-                legend_x0 = 0.97 - legend_w  # правый край с небольшим отступом
-                legend_y0 = 0.06             # отступ от низа
-                # Белая подложка под всю легенду (с местом для подписей)
-                pad = 0.012
-                ax.add_patch(plt.Rectangle(
-                    (legend_x0 - pad, legend_y0 - 0.045),
-                    legend_w + 2 * pad, cell_h + 0.075,
-                    transform=ax.transAxes,
-                    facecolor="white", edgecolor="#333",
-                    linewidth=0.7, zorder=18,
-                ))
-                # Заголовок над цветами
-                ax.text(
-                    legend_x0 + legend_w / 2,
-                    legend_y0 + cell_h + 0.012,
-                    "Доли ПДК",
-                    transform=ax.transAxes,
-                    ha="center", va="bottom",
-                    fontsize=9, fontweight="bold", color="black", zorder=20,
-                )
-                # Цветные ячейки + числовые подписи под каждой
-                for i, (lv, color, txt) in enumerate(present):
-                    cx = legend_x0 + i * cell_w
-                    ax.add_patch(plt.Rectangle(
-                        (cx, legend_y0),
-                        cell_w * 0.95, cell_h,
-                        transform=ax.transAxes,
-                        facecolor=color, edgecolor="#333",
-                        linewidth=0.4, zorder=19,
-                    ))
-                    ax.text(
-                        cx + cell_w * 0.475,
-                        legend_y0 - 0.006,
-                        txt,
-                        transform=ax.transAxes,
-                        ha="center", va="top",
-                        fontsize=8, color="black", zorder=20,
-                    )
-
-    ax.set_xlim(0, x_length)
-    ax.set_ylim(0, y_length)
-    ax.set_aspect("equal")
-
-    if show_axes:
-        # Прямоугольная координатная сетка по периметру:
-        # шаг подписей подбираем "круглым" — 250/500/1000 м
-        tick_candidates = [100, 200, 250, 500, 1000, 2000]
-        # Целимся на 6-10 тиков по большей оси
-        target_tick = max(x_length, y_length) / 8
-        tick_step = tick_candidates[0]
-        for c in tick_candidates:
-            if c <= target_tick:
-                tick_step = c
-        x_ticks = list(np.arange(0, x_length + 1, tick_step))
-        y_ticks = list(np.arange(0, y_length + 1, tick_step))
-        ax.set_xticks(x_ticks)
-        ax.set_yticks(y_ticks)
-        ax.set_xticklabels([f"{int(t)}" for t in x_ticks])
-        ax.set_yticklabels([f"{int(t)}" for t in y_ticks])
-        ax.set_xlabel("X, м", fontsize=12)
-        ax.set_ylabel("Y, м", fontsize=12)
-        ax.tick_params(labelsize=11, direction="out", length=4, color="#333")
-        ax.grid(True, alpha=0.35, linestyle="--", color="#666", linewidth=0.6)
-        # Чёрная рамка по периметру
-        for spine in ax.spines.values():
-            spine.set_visible(True)
-            spine.set_color("#333")
-            spine.set_linewidth(1.0)
-    else:
-        ax.set_axis_off()
-
-    if show_title and substance_name:
-        ax.set_title(
-            f"Карта приземных концентраций {substance_name}, доли ПДК",
-            fontsize=13, fontweight="bold", pad=10,
-        )
-
-    fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
-    buf = io.BytesIO()
-    fig.savefig(
-        buf, format="png", dpi=150,
-        bbox_inches="tight" if (show_axes or show_title) else None,
-        pad_inches=0.05 if (show_axes or show_title) else 0,
-        transparent=not show_axes,  # белый фон только в PDF (show_axes=True)
-        facecolor=fig_face,
-    )
-    plt.close(fig)
-    buf.seek(0)
-    return buf
-
-
-# ---------------------------------------------------------------------------
-# Основная функция генерации PDF
-# ---------------------------------------------------------------------------
 
 def generate_pdf(request_data: dict, result_data: dict) -> bytes:
     """
@@ -973,6 +662,7 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
     ]
     src_rows = [src_headers]
     for idx, s in enumerate(sources_list, 1):
+        src_num = source_number(_SrcView(s), idx - 1)
         d = s.get("diameter") or 0.0
         w = s.get("velocity") or 0.0
         # Объём газовоздушной смеси V = π·D²/4 · w₀
@@ -986,7 +676,7 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
         is_area = (s.get("source_type") or s.get("type")) == "area"
         angle = s.get("area_angle") if is_area else 90
         src_rows.append([
-            f"{idx:02d}",
+            src_num,
             str(s.get("height", "—")),
             str(s.get("diameter", "—")),
             str(s.get("velocity", "—")),
@@ -1042,6 +732,7 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
             entry = subs_emissions.setdefault(code, [])
             entry.append({
                 "src_idx": src_idx,
+                "src_num": source_number(_SrcView(src), src_idx - 1),
                 "src_name": src.get("name") or f"Источник {src_idx}",
                 "em_gs": em_gs,
                 "em_ty": em_ty,
@@ -1099,7 +790,7 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
                 cm_val = cm_map.get(e["src_name"])
                 cm_txt = f"{cm_val:.4f}" if isinstance(cm_val, (int, float)) else "—"
                 triple.extend([
-                    f"{e['src_idx']:02d}",
+                    e["src_num"],
                     f"{e['em_gs']:.6f}",
                     cm_txt,
                     f"{e['em_ty']:.4f}",
@@ -1263,7 +954,7 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
             for tp in top_points:
                 contribs = (tp.get("contributions") or [])[:_MAX_CONTRIBS]
                 parts = [
-                    f"{(c.get('src_index', 0) + 1):02d}={c.get('contribution_pdk', 0):.4f}"
+                    f"{c.get('number') or (c.get('src_index', 0) + 1)}={c.get('contribution_pdk', 0):.4f}"
                     for c in contribs
                 ]
                 contrib_cell = Paragraph(", ".join(parts) if parts else "—", _contrib_style)
@@ -1271,7 +962,8 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
                     f"{tp.get('qh', 0):.4f}",
                     str(tp.get("x_m", 0)),
                     str(tp.get("y_m", 0)),
-                    str(tp.get("wind_dir_deg") if tp.get("wind_dir_deg") is not None else "—"),
+                    # HB как в «Радуге»: куда дует ветер, от оси OX против часовой
+                    str((270 - tp["wind_dir_deg"]) % 360 if tp.get("wind_dir_deg") is not None else "—"),
                     f"{tp.get('wind_speed_ms', 0):.1f}",
                     contrib_cell,
                 ])
@@ -1309,23 +1001,7 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
     boundary_points_total = sum(len(c or []) for c in boundaries)
     ent_name = enterprise.get("name") or "—"
 
-    sources_for_map = request_data.get("sources") or []
     grid_data = request_data.get("grid") or {}
-    show_axes = bool(request_data.get("map_show_axes", True))
-    show_title = bool(request_data.get("map_show_title", True))
-    # Тип карты: "isolines" (по умолчанию) или "grid" (старая ОНД-сетка с числами)
-    map_type = (request_data.get("map_type") or "isolines").lower()
-
-    # Стили легенды и примечания — один раз, потом переиспользуем
-    legend_style = ParagraphStyle(
-        "color_legend", fontName=FONT, fontSize=10,
-        alignment=TA_CENTER, spaceAfter=4, leading=14,
-    )
-    note_style = ParagraphStyle(
-        "map_note", fontName=FONT, fontSize=8,
-        alignment=TA_LEFT, textColor=colors.HexColor("#475569"),
-        leftIndent=4, rightIndent=4, spaceAfter=4, leading=11,
-    )
 
     for sub_idx, sub in enumerate(by_subs):
         # Поддерживаем две формы: name/code как на верхнем уровне (precomputed
@@ -1342,34 +1018,17 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
         if not sub_points:
             continue
         try:
-            if map_type == "grid":
-                # Старая сетка ОНД с числами концентраций в ячейках.
-                # _make_concentration_plot ожидает grid_step из grid_data.
-                grid_step = grid_data.get("step", 500) if grid_data else 500
-                title_text = (
-                    f"Карта приземных концентраций {sub_name}, доли ПДК" if show_title
-                    else "Карта рассеивания, доли ПДК"
-                )
-                png_buf = _make_concentration_plot(
-                    sub_points,
-                    grid_step=grid_step,
-                    title=title_text,
-                    grid_params=grid_data,
-                    sources=None,        # источники в карте отключены
-                    boundaries=boundaries,
-                    pdk=sub_pdk,         # значения в ячейках — в долях ПДК
-                )
-            else:
-                png_buf = _make_transparent_dispersion_map(
-                    sub_points,
-                    sources=sources_for_map,
-                    boundaries=boundaries,
-                    pdk=sub_pdk,
-                    substance_name=sub_name,
-                    show_axes=show_axes,
-                    show_title=show_title,
-                    grid_data=grid_data,
-                )
+            # Сетка ОНД с числами концентраций (доли ПДК) в ячейках
+            grid_step = grid_data.get("step", 500) if grid_data else 500
+            png_buf = _make_concentration_plot(
+                sub_points,
+                grid_step=grid_step,
+                title=f"Карта приземных концентраций {sub_name}, доли ПДК",
+                grid_params=grid_data,
+                sources=None,        # источники в карте отключены
+                boundaries=boundaries,
+                pdk=sub_pdk,         # значения в ячейках — в долях ПДК
+            )
             if png_buf is None:
                 continue
 
@@ -1407,28 +1066,6 @@ def generate_pdf(request_data: dict, result_data: dict) -> bytes:
             map_img = RLImage(png_buf, width=disp_w, height=disp_h)
             story.append(map_img)
 
-            # Цветовая легенда + примечание (только для типа "isolines",
-            # для "grid" они не нужны — там значения прямо в ячейках).
-            # Изолируем в свой try/except — если что-то с разметкой,
-            # карта останется в PDF, упадёт только пояснение.
-            if map_type != "grid":
-                try:
-                    story.append(Spacer(1, 0.2 * cm))
-                    story.append(Paragraph(
-                        "<b>Цветовая шкала (доли ПДК):</b><br/>" + _color_legend_html(),
-                        legend_style,
-                    ))
-                    story.append(Paragraph(
-                        "<i>Примечание: цветная заливка отображает все области, где "
-                        "приземная концентрация выше <b>0,01 ПДК</b>. Отдельные мелкие "
-                        "пятна вне основного облака соответствуют локальным пикам "
-                        "концентрации у изолированных источников выбросов "
-                        "(на расстоянии Xm от каждой трубы). Жирная красная линия — "
-                        "граница превышения ПДК (1,0 ПДК).</i>",
-                        note_style,
-                    ))
-                except Exception as e:
-                    print(f"[pdf_export] Легенда/примечание #{sub_idx} не построены: {e}")
         except Exception as e:
             traceback_text = ""
             try:

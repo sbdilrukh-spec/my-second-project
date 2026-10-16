@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { fetchCities, fetchSubstances, fetchWeather, calculate, fetchTables, exportPdf, exportMapPng, exportExcel } from "./api.js";
+import { fetchCities, fetchSubstances, fetchWeather, calculate, fetchTables, exportPdf, exportMapPng, exportExcel, exportRadugaDocx } from "./api.js";
 import { translations } from "./i18n.js";
 import SourceForm, { createDefaultSource, migrateSource } from "./components/SourceForm.jsx";
+import { sourceNumber } from "./sourceNumber.js";
 import MeteoPanel from "./components/MeteoPanel.jsx";
 
 import EnterpriseCard, { DEFAULT_ENTERPRISE } from "./components/EnterpriseCard.jsx";
@@ -231,7 +232,8 @@ export default function App() {
     const q = sourceFilter.trim().toLowerCase();
     if (!q) return items;
     return items.filter(({ src, i }) =>
-      (src.name || "").toLowerCase().includes(q) || String(i + 1) === q
+      (src.name || "").toLowerCase().includes(q) || String(i + 1) === q ||
+      sourceNumber(src, i).toLowerCase() === q
     );
   }, [sources, sourceFilter]);
 
@@ -647,11 +649,6 @@ export default function App() {
     }
   };
 
-  // Тип карты рассеивания в PDF:
-  //   "isolines" — изолинии в долях ПДК с цветной заливкой
-  //   "grid"     — старая ОНД-сетка с числами концентраций в ячейках
-  const [pdfMapType, setPdfMapType] = useState("isolines");
-
   // Экспорт PDF
   const handleExportPdf = async () => {
     if (!result) {
@@ -662,17 +659,11 @@ export default function App() {
     try {
       const pdk = Math.min(...sources.map(s => s.pdk ?? 0.5));
       // Передаём уже готовые результаты — бэкенд пропустит пересчёт.
-      // Для типа "grid" оси не нужны (внутри сетки уже свои оси и подписи).
-      // Для "isolines" — оси и заголовок включены, фон белый.
-      const showAxesInPdf = pdfMapType !== "grid";
       await exportPdf({
         sources, meteo, grid, pdk,
         substance: sources[0]?.substance || selectedSubstance,
         enterprise,
         precomputed_result: result,
-        map_type: pdfMapType,
-        map_show_axes: showAxesInPdf,
-        map_show_title: showAxesInPdf,
       });
     } catch (e) {
       const detail = e?.response?.data?.detail || e?.message || "неизвестная ошибка";
@@ -706,6 +697,23 @@ export default function App() {
       setError(`Ошибка скачивания PNG: ${detail}`);
     } finally {
       setExportingPng(false);
+    }
+  };
+
+  // Таблицы «Радуги» в Word (1, 7, 8, 12, 13)
+  const [exportingDocx, setExportingDocx] = useState(false);
+  const handleExportDocx = async () => {
+    setExportingDocx(true);
+    setError(null);
+    try {
+      await exportRadugaDocx({
+        sources: toBackendSources(sources), meteo, grid, enterprise,
+        precomputed_result: result,
+      });
+    } catch (e) {
+      setError(`Ошибка формирования таблиц Word: ${e?.message || "неизвестная ошибка"}`);
+    } finally {
+      setExportingDocx(false);
     }
   };
 
@@ -942,12 +950,12 @@ export default function App() {
 
             {/* ---- Импорт CSV/Excel ---- */}
             <ImportPanel
-              onImport={(imported) => {
+              onImport={(imported, meta = {}) => {
                 const city = cities.find(c => c.name === meteo.city);
                 const centerLat = city?.lat ?? 41.3;
                 const centerLon = city?.lon ?? 69.24;
                 const spacing = 0.002; // ~200м между источниками
-                const cols = Math.ceil(Math.sqrt(imported.length));
+                const warnings = [];
 
                 // Находит вещество по коду или названию из импорта.
                 // Сначала по коду (точное совпадение), затем без учёта ведущих
@@ -973,31 +981,53 @@ export default function App() {
                   return null;
                 };
 
-                // Группируем строки по имени источника:
-                // несколько строк с одним name → один источник с несколькими выбросами.
+                // Группируем строки по источнику (№ + название):
+                // несколько строк одного источника → один источник с несколькими выбросами.
                 const groups = new Map();
                 imported.forEach((row, i) => {
-                  const name = (row.name && String(row.name).trim()) || `Источник ${i + 1}`;
-                  if (!groups.has(name)) groups.set(name, []);
-                  groups.get(name).push(row);
+                  const name = (row.name && String(row.name).trim()) || `Источник ${row.number ?? i + 1}`;
+                  const key = `${row.number ?? ""}|${name}`;
+                  if (!groups.has(key)) groups.set(key, []);
+                  groups.get(key).push({ ...row, name });
                 });
 
-                const totalGroups = groups.size;
-                const gridCols = Math.ceil(Math.sqrt(totalGroups));
+                const gridCols = Math.ceil(Math.sqrt(groups.size));
+                // X/Y карты-схемы без начала координат — ставим от центра города
+                const cosLat = Math.cos((centerLat * Math.PI) / 180);
+                const unknownSubstances = new Set();
+                let autoPlaced = 0;
+                let fromXY = 0;
 
                 const newSources = [];
                 let groupIdx = 0;
-                for (const [name, rows] of groups.entries()) {
+                for (const rows of groups.values()) {
                   const first = rows[0];
-                  // Авторасстановка по сетке если нет координат
-                  const r = Math.floor(groupIdx / gridCols);
-                  const c = groupIdx % gridCols;
-                  const autoLat = centerLat + (r - Math.floor(gridCols / 2)) * spacing;
-                  const autoLon = centerLon + (c - Math.floor(gridCols / 2)) * spacing;
+                  let lat = first.lat;
+                  let lon = first.lon;
+                  if ((lat == null || lon == null) && first.x_m != null && first.y_m != null) {
+                    lat = centerLat + first.y_m / 111000;
+                    lon = centerLon + first.x_m / (111000 * cosLat);
+                    fromXY += 1;
+                  }
+                  if (lat == null || lon == null) {
+                    // Координат нет совсем — авторасстановка сеткой вокруг центра
+                    const r = Math.floor(groupIdx / gridCols);
+                    const c = groupIdx % gridCols;
+                    lat = centerLat + (r - Math.floor(gridCols / 2)) * spacing;
+                    lon = centerLon + (c - Math.floor(gridCols / 2)) * spacing;
+                    autoPlaced += 1;
+                  }
 
                   // Каждая строка в группе → одна запись в emissions
                   const emissions = rows.map((row) => {
-                    const sub = findSubstance(row.substance_code, row.substance_name) || selectedSubstance || null;
+                    let sub = findSubstance(row.substance_code, row.substance_name);
+                    if (!sub) {
+                      // Не нашли в справочнике — сохраняем как есть, ПДК надо проверить
+                      unknownSubstances.add(row.substance_name || row.substance_code || "без названия");
+                      sub = (row.substance_name || row.substance_code)
+                        ? { code: row.substance_code || "", name: row.substance_name || row.substance_code, pdk_mr: 0.5 }
+                        : null;
+                    }
                     return {
                       substance: sub,
                       emission_gs: row.emission_gs ?? null,
@@ -1006,20 +1036,45 @@ export default function App() {
                     };
                   });
 
+                  const isArea = first.type === "area";
                   newSources.push({
-                    name,
-                    lat: first.lat || autoLat,
-                    lon: first.lon || autoLon,
+                    ...createDefaultSource(lat, lon, sources.length + groupIdx),
+                    name: first.name,
+                    number: first.number ?? "",
+                    lat,
+                    lon,
                     height: first.height || 30,
                     diameter: first.diameter || 1.0,
                     velocity: first.velocity || 8.0,
-                    temperature: first.temperature || 120,
+                    temperature: first.temperature ?? 120,
+                    ...(isArea ? {
+                      type: "area",
+                      area_length: first.area_length,
+                      area_width: first.area_width,
+                      area_angle: first.area_angle ?? 0,
+                    } : {}),
                     emissions,
                   });
                   groupIdx += 1;
                 }
 
+                if (fromXY > 0) {
+                  warnings.push(
+                    `${fromXY} ист.: координаты X/Y без начала координат — поставлены от центра города «${meteo.city}». ` +
+                    `Укажите широту/долготу точки X=0, Y=0 в строке 3 шаблона.`
+                  );
+                }
+                if (autoPlaced > 0) {
+                  warnings.push(`${autoPlaced} ист. без координат — расставлены сеткой вокруг центра города.`);
+                }
+                if (unknownSubstances.size > 0) {
+                  warnings.push(
+                    `Не найдены в справочнике (ПДК принят 0,5 — проверьте): ${[...unknownSubstances].join(", ")}`
+                  );
+                }
+
                 setSources((prev) => [...prev, ...newSources]);
+                return warnings;
               }}
               t={t}
             />
@@ -1160,8 +1215,8 @@ export default function App() {
             exportingPng={exportingPng}
             onExportExcel={handleExportExcel}
             exportingExcel={exportingExcel}
-            pdfMapType={pdfMapType}
-            onChangePdfMapType={setPdfMapType}
+            onExportDocx={handleExportDocx}
+            exportingDocx={exportingDocx}
             t={t}
           />
 

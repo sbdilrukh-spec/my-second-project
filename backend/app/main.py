@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Query, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, PlainTextResponse, Response
+from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 from typing import Optional
 import base64
@@ -18,10 +18,10 @@ from .models import (
 )
 from .meteo_data import CITIES
 from .ond86 import compute_grid, compute_szz_boundary, compute_per_substance
-from .pdf_export import generate_pdf, _make_transparent_dispersion_map, _make_concentration_plot
+from .pdf_export import generate_pdf, _make_concentration_plot
 from .substances import SUBSTANCES
 from .tables import generate_pdv_tables, generate_ovos_tables
-from .import_sources import parse_csv, parse_excel, generate_template_csv, generate_template_xlsx
+from .import_sources import parse_csv, parse_excel, generate_template_xlsx
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +91,27 @@ class SubstanceBody(BaseModel):
     F: float = 1.0
 
 app = FastAPI(title="ОНД-86 API", version="1.0.0")
+
+
+@app.on_event("startup")
+def _warm_up_calc_kernel():
+    """Компиляция numba-ядра в фоне, чтобы первый расчёт не ждал её (~3–10 с)."""
+    import threading
+
+    def run():
+        try:
+            from .models import SourceInput, EmissionEntry, MeteoInput
+            from .ond86 import compute_grid
+            src = SourceInput(name="warmup", lat=40.0, lon=65.0, height=10, diameter=0.5,
+                              velocity=5, temperature=100,
+                              emissions=[EmissionEntry(emission_gs=1.0)])
+            meteo = MeteoInput(city="", wind_speed=2, wind_direction=0,
+                               stability_class="D", temperature=25)
+            compute_grid([src], meteo, {"A": 200}, grid_step=500, x_length=1000, y_length=1000)
+        except Exception as e:  # прогрев не критичен
+            print(f"[warmup] {e}")
+
+    threading.Thread(target=run, daemon=True).start()
 
 app.add_middleware(
     CORSMiddleware,
@@ -267,11 +288,13 @@ async def import_sources(file: UploadFile = File(...)):
     filename = file.filename.lower()
     content = await file.read()
 
+    origin = None
     if filename.endswith(".csv"):
         text = content.decode("utf-8-sig")
         sources = parse_csv(text)
     elif filename.endswith(".xlsx"):
-        sources = parse_excel(content)
+        parsed = parse_excel(content)
+        sources, origin = parsed["rows"], parsed["origin"]
     else:
         raise HTTPException(status_code=400, detail="Поддерживаются только CSV (.csv) и Excel (.xlsx)")
 
@@ -286,7 +309,13 @@ async def import_sources(file: UploadFile = File(...)):
         else:
             valid.append(s)
 
-    return {"sources": valid, "errors": errors, "total": len(sources), "valid_count": len(valid)}
+    # Источники с X/Y карты-схемы, но без начала координат: фронт поставит
+    # их от центра города и предупредит пользователя.
+    needs_origin = any(s.get("lat") is None and s.get("x_m") is not None for s in valid)
+    return {
+        "sources": valid, "errors": errors, "total": len(sources),
+        "valid_count": len(valid), "origin": origin, "needs_origin": needs_origin,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -296,8 +325,8 @@ async def import_sources(file: UploadFile = File(...)):
 @app.get("/api/import/template")
 def get_import_template():
     xlsx_bytes = generate_template_xlsx()
-    return StreamingResponse(
-        io.BytesIO(xlsx_bytes),
+    return Response(
+        content=xlsx_bytes,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=template_sources.xlsx"},
     )
@@ -406,6 +435,11 @@ def _grid_kwargs(grid) -> dict:
 # POST /api/calculate  — расчёт поля концентраций
 # ---------------------------------------------------------------------------
 
+def _sig(v: float, digits: int = 7) -> float:
+    """Округление до значащих цифр: малые концентрации не обнуляются (таблица 12)."""
+    return float(f"{v:.{digits}g}")
+
+
 @app.post("/api/calculate", response_model=CalculationResponse)
 def calculate(req: CalculationRequest):
     if not req.sources:
@@ -430,8 +464,8 @@ def calculate(req: CalculationRequest):
         top_pts_raw = data.get("top_points") or []
         top_pts = [
             TopPoint(
-                qh=round(tp["qh"], 6),
-                c_mg=round(tp["c_mg"], 6),
+                qh=_sig(tp["qh"]),
+                c_mg=_sig(tp["c_mg"]),
                 x_m=tp["x_m"],
                 y_m=tp["y_m"],
                 lat=tp["lat"],
@@ -447,13 +481,14 @@ def calculate(req: CalculationRequest):
             name=sub_meta.get("name") if sub_meta else None,
             hazard_class=sub_meta.get("hazard_class") if sub_meta else None,
             pdk=data["pdk"],
-            max_c=round(data["max_c"], 6),
+            max_c=_sig(data["max_c"]),
             max_lat=data["max_lat"],
             max_lon=data["max_lon"],
             exceeds_pdk=data["exceeds_pdk"],
             ratio_to_pdk=round(data["ratio_to_pdk"], 4),
             points=[
-                GridPoint(lat=p["lat"], lon=p["lon"], c=round(p["c"], 6))
+                GridPoint(lat=p["lat"], lon=p["lon"], c=_sig(p["c"]),
+                          d=p.get("d"), u=p.get("u"))
                 for p in data["points"]
             ],
             source_results=[SourceResult(**sr) for sr in data["source_results"]],
@@ -465,7 +500,7 @@ def calculate(req: CalculationRequest):
     primary_data = multi["by_substance"][primary_code]
 
     primary_points = [
-        GridPoint(lat=p["lat"], lon=p["lon"], c=round(p["c"], 6))
+        GridPoint(lat=p["lat"], lon=p["lon"], c=_sig(p["c"]))
         for p in primary_data["points"]
     ]
     primary_pdk = primary_data["pdk"]
@@ -488,7 +523,7 @@ def calculate(req: CalculationRequest):
 
     return CalculationResponse(
         points=primary_points,
-        max_c=round(primary_data["max_c"], 6),
+        max_c=_sig(primary_data["max_c"]),
         max_lat=primary_data["max_lat"],
         max_lon=primary_data["max_lon"],
         source_results=[SourceResult(**sr) for sr in primary_data["source_results"]],
@@ -511,7 +546,7 @@ def get_tables(req: CalculationRequest):
 
     city_data = CITIES.get(req.meteo.city, {"A": 200})
 
-    lats, lons, total_mg, src_results, _dir_at_max = compute_grid(
+    lats, lons, total_mg, src_results, _dir_at_max, _u_at_max = compute_grid(
         sources=req.sources,
         meteo=req.meteo,
         city_data=city_data,
@@ -606,8 +641,8 @@ def _export_pdf_inner(req: CalculationRequest):
 
     pdf_bytes = generate_pdf(request_dict, result_dict)
 
-    return StreamingResponse(
-        io.BytesIO(pdf_bytes),
+    return Response(
+        content=pdf_bytes,
         media_type="application/pdf",
         headers={"Content-Disposition": "attachment; filename=ond86_report.pdf"},
     )
@@ -621,7 +656,7 @@ def _export_pdf_inner(req: CalculationRequest):
 def export_excel(req: CalculationRequest):
     city_data = CITIES.get(req.meteo.city, {"A": 200})
 
-    lats, lons, total_mg, src_results, _dir_at_max = compute_grid(
+    lats, lons, total_mg, src_results, _dir_at_max, _u_at_max = compute_grid(
         sources=req.sources,
         meteo=req.meteo,
         city_data=city_data,
@@ -704,8 +739,8 @@ def export_excel(req: CalculationRequest):
     buf.seek(0)
 
     filename = "ond86_tables.xlsx"
-    return StreamingResponse(
-        buf,
+    return Response(
+        content=buf.getvalue(),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
@@ -749,17 +784,6 @@ def export_map_png(req: CalculationRequest):
         if not by_substance_data:
             raise HTTPException(status_code=400, detail="Нет данных для построения карт. Сначала выполните расчёт.")
 
-        # Конвертируем источники в простые dict (Pydantic модели или dict)
-        sources_for_map = []
-        for src in req.sources:
-            try:
-                sources_for_map.append({"lat": src.lat, "lon": src.lon, "name": src.name})
-            except AttributeError:
-                if isinstance(src, dict):
-                    sources_for_map.append({
-                        "lat": src.get("lat"), "lon": src.get("lon"), "name": src.get("name", "")
-                    })
-
         def _pts_to_dicts(pts):
             out = []
             for p in pts or []:
@@ -780,9 +804,9 @@ def export_map_png(req: CalculationRequest):
 
         grid_data = req.grid.model_dump() if req.grid else {}
 
-        # Создаём ZIP в памяти
+        # Создаём ZIP в памяти. PNG уже сжаты — повторно не жмём (ZIP_STORED).
         zip_buf = io.BytesIO()
-        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_STORED) as zf:
             for idx, sub in enumerate(by_substance_data):
                 if isinstance(sub, dict):
                     # Поддерживаем две формы: name/code на верхнем уровне sub
@@ -804,47 +828,28 @@ def export_map_png(req: CalculationRequest):
                 if not sub_points:
                     continue
 
-                # Безопасное имя файла (общее для обоих вариантов карты)
                 safe_name = re.sub(r"[^A-Za-zА-Яа-я0-9_-]+", "_", sub_name).strip("_") or f"map_{idx+1}"
 
-                # 1) Изолинии (цветное облако) — как и раньше
-                png_buf = _make_transparent_dispersion_map(
+                # Сетка ОНД с числами — прозрачный фон, полупрозрачная заливка,
+                # высокое разрешение (чёткие цифры при увеличении в CorelDraw).
+                grid_step = grid_data.get("step", 500) if grid_data else 500
+                grid_buf = _make_concentration_plot(
                     sub_points,
-                    sources=sources_for_map,
+                    grid_step=grid_step,
+                    title=f"Карта рассеивания {sub_name}, доли ПДК",
+                    grid_params=grid_data,
+                    sources=None,
                     boundaries=boundaries,
                     pdk=sub_pdk,
-                    substance_name=sub_name,
-                    show_axes=False,   # для CorelDraw — без осей
-                    show_title=False,  # без заголовка
-                    grid_data=grid_data,
+                    transparent=True,
+                    dpi=300,
                 )
-                if png_buf is not None:
-                    zf.writestr(f"izolinii_{safe_name}.png", png_buf.getvalue())
-
-                # 2) Сетка ОНД с числами — прозрачный фон, полупрозрачная
-                #    заливка, высокое разрешение (чёткие цифры при увеличении).
-                grid_step = grid_data.get("step", 500) if grid_data else 500
-                try:
-                    grid_buf = _make_concentration_plot(
-                        sub_points,
-                        grid_step=grid_step,
-                        title=f"Карта рассеивания {sub_name}, доли ПДК",
-                        grid_params=grid_data,
-                        sources=None,
-                        boundaries=boundaries,
-                        pdk=sub_pdk,
-                        transparent=True,
-                        dpi=300,
-                    )
-                    if grid_buf is not None:
-                        zf.writestr(f"setka-ond_{safe_name}.png", grid_buf.getvalue())
-                except Exception as grid_err:
-                    # Сетка не критична — изолинии уже в архиве, не валим весь экспорт
-                    print(f"[map-png] Сетка ОНД для «{sub_name}» не построена: {grid_err}")
+                if grid_buf is not None:
+                    zf.writestr(f"setka-ond_{safe_name}.png", grid_buf.getvalue())
 
         zip_buf.seek(0)
-        return StreamingResponse(
-            zip_buf,
+        return Response(
+            content=zip_buf.getvalue(),
             media_type="application/zip",
             headers={"Content-Disposition": "attachment; filename=karty-rasseivaniya.zip"},
         )
@@ -857,6 +862,38 @@ def export_map_png(req: CalculationRequest):
             status_code=500,
             detail=f"Ошибка генерации карт PNG: {type(e).__name__}: {str(e)[:500]}"
         )
+
+
+# ---------------------------------------------------------------------------
+# POST /api/export/raduga-docx  — таблицы 1, 7, 8, 12, 13 в формате «Радуги» (Word)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/export/raduga-docx")
+def export_raduga_docx(req: CalculationRequest):
+    from .raduga_docx import generate_raduga_docx
+
+    if not req.sources:
+        raise HTTPException(status_code=400, detail="Необходимо указать хотя бы один источник")
+    # Готовый результат с фронта годится, если в точках есть опасные HB и U
+    # (результат нового расчёта); иначе считаем заново.
+    res = req.precomputed_result if isinstance(req.precomputed_result, dict) else None
+    subs = (res or {}).get("by_substance") or []
+    if not subs or not all(s.get("points") and "d" in s["points"][0] for s in subs):
+        res = calculate(req).model_dump()
+
+    city = CITIES.get(req.meteo.city) or {}
+    request_data = req.model_dump(exclude={"precomputed_result", "map_snapshot", "map_snapshots"})
+    try:
+        data = generate_raduga_docx(request_data, res, coef_a=city.get("A", 200))
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Ошибка формирования таблиц: {type(e).__name__}: {e}")
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": "attachment; filename=raduga_tables.docx"},
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -1,3 +1,4 @@
+import { sourceNumber } from "../sourceNumber.js";
 import React, { useState } from "react";
 
 const STACK_DEFAULTS = {
@@ -151,7 +152,7 @@ function SourceForm({
             fontSize: 12, fontWeight: 600, color: "#1E293B",
             overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
           }}>
-            {index + 1}. {source.name || `Источник ${index + 1}`}
+            №{sourceNumber(source, index)}. {source.name || `Источник ${index + 1}`}
           </span>
           <span style={{ fontSize: 10, color: "#64748b", flexShrink: 0 }}>
             {source.type === "area" ? "площадной" : `H=${source.height ?? "—"}м`} · {emissions.length} в-в ▸
@@ -164,6 +165,14 @@ function SourceForm({
   return (
     <div className="source-card">
       <div className="source-header">
+        <input
+          type="text"
+          value={source.number ?? ""}
+          placeholder={sourceNumber(source, index)}
+          onChange={(e) => onChange(index, "number", e.target.value)}
+          title="№ источника на карте-схеме (как в таблицах Радуги)"
+          style={{ width: 54, flexShrink: 0, fontWeight: 600, textAlign: "center" }}
+        />
         <input
           className="source-name-input"
           type="text"

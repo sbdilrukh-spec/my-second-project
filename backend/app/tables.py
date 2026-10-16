@@ -7,6 +7,8 @@
 
 import numpy as np
 
+from .ond86 import source_number
+
 
 def generate_pdv_tables(sources, meteo, city_data, substance, result, enterprise=None):
     """Генерирует таблицы П-1..П-5 для раздела ПДВ."""
@@ -17,7 +19,7 @@ def generate_pdv_tables(sources, meteo, city_data, substance, result, enterprise
     for i, src in enumerate(sources):
         V1 = np.pi / 4 * src.diameter ** 2 * src.velocity
         p1_rows.append({
-            "number": i + 1,
+            "number": source_number(src, i),
             "name": src.name,
             "lat": round(src.lat, 5),
             "lon": round(src.lon, 5),
@@ -38,7 +40,7 @@ def generate_pdv_tables(sources, meteo, city_data, substance, result, enterprise
     p2_rows = []
     for i, src in enumerate(sources):
         p2_rows.append({
-            "number": i + 1,
+            "number": source_number(src, i),
             "source": src.name,
             "substance": sub_name,
             "emission_gs": src.get_emission_gs(),
@@ -79,7 +81,7 @@ def generate_pdv_tables(sources, meteo, city_data, substance, result, enterprise
     p5_rows = []
     for i, src in enumerate(sources):
         p5_rows.append({
-            "number": i + 1,
+            "number": source_number(src, i),
             "source": src.name,
             "substance": sub_name,
             "pdv_gs": src.get_emission_gs(),
@@ -103,7 +105,7 @@ def generate_ovos_tables(sources, meteo, city_data, substance, result, enterpris
     for i, src in enumerate(sources):
         V1 = np.pi / 4 * src.diameter ** 2 * src.velocity
         o1_rows.append({
-            "number": i + 1,
+            "number": source_number(src, i),
             "name": src.name,
             "H": src.height,
             "D": src.diameter,

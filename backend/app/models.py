@@ -8,6 +8,7 @@ class SubstanceInput(BaseModel):
     pdk_mr: Optional[float] = None
     pdk_ss: Optional[float] = None
     hazard_class: Optional[int] = None
+    F: Optional[float] = None   # коэффициент оседания (1 — газы, 2–3 — пыль)
 
 
 class EmissionEntry(BaseModel):
@@ -43,6 +44,8 @@ class EmissionEntry(BaseModel):
 
 class SourceInput(BaseModel):
     name: str = "Источник 1"
+    # Номер источника на карте-схеме, заданный пользователем (0001, 6001, ...)
+    number: Optional[str] = None
     lat: float
     lon: float
     height: float        # Высота трубы, м
@@ -153,12 +156,16 @@ class GridPoint(BaseModel):
     lat: float
     lon: float
     c: float      # концентрация, мг/м³
+    d: Optional[int] = None     # опасное направление ветра, ° (HB)
+    u: Optional[float] = None   # опасная скорость ветра, м/с (U)
 
 
 class SourceResult(BaseModel):
     name: str
+    number: Optional[str] = None
     cm_mg: float   # Максимальная концентрация, мг/м³
     xm: float      # Расстояние до максимума, м
+    um: Optional[float] = None   # Опасная скорость ветра, м/с
 
 
 class SzzBoundaryPoint(BaseModel):
@@ -178,6 +185,7 @@ class SzzResult(BaseModel):
 class TopPointContribution(BaseModel):
     """Вклад одного источника в концентрацию в одной из top-N точек."""
     src_index: int
+    number: Optional[str] = None
     name: str
     contribution_mg: float
     contribution_pdk: float

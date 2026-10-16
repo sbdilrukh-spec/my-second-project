@@ -128,6 +128,30 @@ export async function exportMapPng(payload) {
   }
 }
 
+// Таблицы 1, 7, 8, 12, 13 в формате распечатки «Радуги» (Word).
+export async function exportRadugaDocx(payload) {
+  try {
+    const res = await axios.post(`${BASE}/export/raduga-docx`, payload, { responseType: "blob" });
+    const url = window.URL.createObjectURL(new Blob([res.data], {
+      type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "tablicy-raduga.docx";
+    a.click();
+    window.URL.revokeObjectURL(url);
+  } catch (err) {
+    let detail = "";
+    if (err.response?.data instanceof Blob) {
+      try {
+        const text = await err.response.data.text();
+        try { detail = JSON.parse(text).detail || text; } catch { detail = text; }
+      } catch { /* ignore */ }
+    }
+    throw new Error(detail || (err.response?.status ? `сервер вернул ${err.response.status}` : "нет ответа от сервера"));
+  }
+}
+
 export async function exportExcel(payload) {
   const res = await axios.post(`${BASE}/export/excel`, payload, {
     responseType: "blob",

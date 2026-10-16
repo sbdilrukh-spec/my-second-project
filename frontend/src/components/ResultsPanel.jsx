@@ -10,7 +10,7 @@ export default function ResultsPanel({
   onExportPdf, exporting,
   onExportMapPng, exportingPng,
   onExportExcel, exportingExcel,
-  pdfMapType, onChangePdfMapType,
+  onExportDocx, exportingDocx,
   t,
 }) {
   if (!result) {
@@ -102,42 +102,6 @@ export default function ResultsPanel({
         </div>
       )}
 
-      {/* Тип карты в PDF: изолинии или сетка ОНД с числами */}
-      {onChangePdfMapType && (
-        <div style={{
-          marginTop: 12, padding: 8, borderRadius: 6,
-          background: "#F1F5F9", border: "1px solid #E2E8F0",
-        }}>
-          <div style={{ fontSize: 11, fontWeight: 600, color: "#334155", marginBottom: 6 }}>
-            Тип карты рассеивания в PDF
-          </div>
-          <label style={{
-            display: "flex", alignItems: "center", gap: 6,
-            fontSize: 11, color: "#1F2937", cursor: "pointer", marginBottom: 4,
-          }}>
-            <input
-              type="radio"
-              name="pdf-map-type"
-              checked={pdfMapType !== "grid"}
-              onChange={() => onChangePdfMapType("isolines")}
-            />
-            <span><b>Изолинии в долях ПДК</b> — цветные изолинии с заливкой и подписями</span>
-          </label>
-          <label style={{
-            display: "flex", alignItems: "center", gap: 6,
-            fontSize: 11, color: "#1F2937", cursor: "pointer",
-          }}>
-            <input
-              type="radio"
-              name="pdf-map-type"
-              checked={pdfMapType === "grid"}
-              onChange={() => onChangePdfMapType("grid")}
-            />
-            <span><b>Сетка ОНД</b> — табличная карта с числами концентрации в каждой ячейке</span>
-          </label>
-        </div>
-      )}
-
       <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
         <button
           className="btn-primary"
@@ -157,6 +121,18 @@ export default function ResultsPanel({
         </button>
       </div>
 
+      {onExportDocx && (
+        <button
+          className="btn-secondary"
+          style={{ width: "100%", marginTop: 6, fontSize: 12 }}
+          onClick={onExportDocx}
+          disabled={exportingDocx}
+          title="Таблицы 1, 7, 8, 12, 13 в формате распечатки «Радуги» — для вставки в отчёт"
+        >
+          {exportingDocx ? "Готовим таблицы..." : "📄 Таблицы Радуги (Word)"}
+        </button>
+      )}
+
       {onExportMapPng && (
         <button
           className="btn-secondary"
@@ -166,7 +142,7 @@ export default function ResultsPanel({
           }}
           onClick={onExportMapPng}
           disabled={exportingPng}
-          title="Прозрачные PNG для наложения в CorelDraw: на каждое вещество два файла — изолинии и сетка ОНД с числами (высокое разрешение, чёткие цифры)"
+          title="Прозрачные PNG сетки ОНД с числами (по одному на вещество) для наложения в CorelDraw, высокое разрешение"
         >
           {exportingPng ? "Готовим PNG..." : "🎨 Скачать карты PNG (для CorelDraw)"}
         </button>

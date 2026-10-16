@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { sourceNumber } from "../sourceNumber.js";
 import {
   MapContainer,
   TileLayer,
@@ -265,172 +266,6 @@ function GridOverlay({ points, maxC, gridStep, originLat, originLon, xLength, yL
   return null;
 }
 
-// ─── Изолинии (Marching Squares) ─────────────────────────────────────────────
-function IsolineOverlay({ points, maxC, pdk }) {
-  const map = useMap();
-
-  useEffect(() => {
-    if (!points || points.length === 0 || !pdk || !maxC) return;
-
-    // Собираем уникальные lat/lon
-    const latSet = new Set();
-    const lonSet = new Set();
-    points.forEach(p => {
-      latSet.add(Math.round(p.lat * 100000) / 100000);
-      lonSet.add(Math.round(p.lon * 100000) / 100000);
-    });
-
-    const lats = Array.from(latSet).sort((a, b) => b - a); // убывание (верх → низ)
-    const lons = Array.from(lonSet).sort((a, b) => a - b); // возрастание
-    const rows = lats.length;
-    const cols = lons.length;
-    if (rows < 2 || cols < 2) return;
-
-    // Строим 2D-сетку концентраций (отсутствующие = 0)
-    const cMap = {};
-    points.forEach(p => {
-      const la = Math.round(p.lat * 100000) / 100000;
-      const lo = Math.round(p.lon * 100000) / 100000;
-      cMap[`${la},${lo}`] = p.c;
-    });
-    const grid = Array.from({ length: rows }, (_, r) =>
-      Array.from({ length: cols }, (_, c) => cMap[`${lats[r]},${lons[c]}`] || 0)
-    );
-
-    // Уровни изолиний (в долях ПДК) по ТЗ.
-    // Изолиния 1.0 ПДК выделена жирной красной — это граница превышения.
-    const levels = [
-      { value: pdk * 0.01, color: "#1F2937", label: "0,01 ПДК", width: 0.6 },
-      { value: pdk * 0.05, color: "#475569", label: "0,05 ПДК", width: 0.7 },
-      { value: pdk * 0.1,  color: "#64748B", label: "0,1 ПДК",  width: 0.8 },
-      { value: pdk * 0.2,  color: "#3B82F6", label: "0,2 ПДК",  width: 0.9 },
-      { value: pdk * 0.3,  color: "#06B6D4", label: "0,3 ПДК",  width: 1.0 },
-      { value: pdk * 0.5,  color: "#EAB308", label: "0,5 ПДК",  width: 1.1 },
-      { value: pdk * 0.6,  color: "#F59E0B", label: "0,6 ПДК",  width: 1.2 },
-      { value: pdk * 0.8,  color: "#F97316", label: "0,8 ПДК",  width: 1.3 },
-      { value: pdk,        color: "#DC2626", label: "1,0 ПДК",  width: 2.4 },
-      { value: pdk * 2,    color: "#991B1B", label: "2,0 ПДК",  width: 1.8 },
-      { value: pdk * 5,    color: "#7F1D1D", label: "5,0 ПДК",  width: 1.8 },
-    ].filter(l => l.value <= maxC * 1.1 && l.value > 0);
-
-    const container = map.getContainer();
-    const canvas = document.createElement("canvas");
-    canvas.style.cssText = "position:absolute;top:0;left:0;pointer-events:none;z-index:401;";
-    container.appendChild(canvas);
-
-    function getSegments(level) {
-      const segs = [];
-      for (let r = 0; r < rows - 1; r++) {
-        for (let c = 0; c < cols - 1; c++) {
-          const v00 = grid[r][c];
-          const v10 = grid[r][c + 1];
-          const v11 = grid[r + 1][c + 1];
-          const v01 = grid[r + 1][c];
-          const b = [v00, v10, v11, v01].map(v => v >= level ? 1 : 0);
-          const idx = (b[0] << 3) | (b[1] << 2) | (b[2] << 1) | b[3];
-          if (idx === 0 || idx === 15) continue;
-
-          function t(va, vb) {
-            return Math.abs(vb - va) < 1e-12 ? 0.5 : Math.max(0, Math.min(1, (level - va) / (vb - va)));
-          }
-          const tT = t(v00, v10), tR = t(v10, v11), tB = t(v01, v11), tL = t(v00, v01);
-
-          const top    = [lats[r],     lons[c] + tT * (lons[c + 1] - lons[c])];
-          const right  = [lats[r] + tR * (lats[r + 1] - lats[r]), lons[c + 1]];
-          const bottom = [lats[r + 1], lons[c] + tB * (lons[c + 1] - lons[c])];
-          const left   = [lats[r] + tL * (lats[r + 1] - lats[r]), lons[c]];
-
-          const edges = { top, right, bottom, left };
-          const cases = {
-            1: [["left","bottom"]], 2: [["bottom","right"]], 3: [["left","right"]],
-            4: [["top","right"]], 5: [["top","right"],["left","bottom"]], 6: [["top","bottom"]],
-            7: [["top","left"]], 8: [["top","left"]], 9: [["top","bottom"]],
-            10: [["top","left"],["bottom","right"]], 11: [["top","right"]],
-            12: [["left","right"]], 13: [["bottom","right"]], 14: [["left","bottom"]],
-          };
-          (cases[idx] || []).forEach(([a, b]) => segs.push([edges[a], edges[b]]));
-        }
-      }
-      return segs;
-    }
-
-    function draw() {
-      const size = map.getSize();
-      canvas.width = size.x;
-      canvas.height = size.y;
-      const ctx = canvas.getContext("2d");
-      ctx.clearRect(0, 0, size.x, size.y);
-
-      for (const lv of levels) {
-        const segs = getSegments(lv.value);
-        if (segs.length === 0) continue;
-
-        ctx.strokeStyle = lv.color;
-        ctx.lineWidth = lv.width;
-        ctx.setLineDash([]);
-
-        for (const [[la, lo], [lb, lob]] of segs) {
-          const pa = map.latLngToContainerPoint([la, lo]);
-          const pb = map.latLngToContainerPoint([lb, lob]);
-          ctx.beginPath();
-          ctx.moveTo(pa.x, pa.y);
-          ctx.lineTo(pb.x, pb.y);
-          ctx.stroke();
-        }
-
-        // Подписи в нескольких местах вдоль изолинии: чем больше сегментов,
-        // тем больше подписей. Минимум одна, максимум четыре.
-        const labelCount = Math.max(1, Math.min(4, Math.floor(segs.length / 12)));
-        const labelStep = Math.max(1, Math.floor(segs.length / (labelCount + 1)));
-        ctx.font = lv.label === "1,0 ПДК" ? "bold 12px sans-serif" : "bold 10px sans-serif";
-        for (let i = 1; i <= labelCount; i++) {
-          const segIdx = Math.min(segs.length - 1, i * labelStep);
-          const seg = segs[segIdx];
-          const pm = map.latLngToContainerPoint(seg[0]);
-          ctx.lineWidth = 3;
-          ctx.strokeStyle = "white";
-          ctx.strokeText(lv.label, pm.x + 4, pm.y - 4);
-          ctx.fillStyle = lv.color;
-          ctx.fillText(lv.label, pm.x + 4, pm.y - 4);
-        }
-      }
-
-      // Легенда
-      if (levels.length > 0) {
-        const lx = size.x - 110, ly0 = 10;
-        ctx.fillStyle = "rgba(255,255,255,0.92)";
-        ctx.strokeStyle = "#ccc";
-        ctx.lineWidth = 1;
-        ctx.fillRect(lx - 4, ly0 - 4, 108, levels.length * 20 + 8);
-        ctx.strokeRect(lx - 4, ly0 - 4, 108, levels.length * 20 + 8);
-        levels.forEach((lv, i) => {
-          const y = ly0 + i * 20 + 8;
-          ctx.strokeStyle = lv.color;
-          ctx.lineWidth = lv.width;
-          ctx.beginPath();
-          ctx.moveTo(lx, y);
-          ctx.lineTo(lx + 28, y);
-          ctx.stroke();
-          ctx.fillStyle = "#1E293B";
-          ctx.font = "11px sans-serif";
-          ctx.textAlign = "left";
-          ctx.textBaseline = "middle";
-          ctx.fillText(lv.label, lx + 34, y);
-        });
-      }
-    }
-
-    draw();
-    map.on("zoom zoomend moveend viewreset", draw);
-    return () => {
-      map.off("zoom zoomend moveend viewreset", draw);
-      if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
-    };
-  }, [points, maxC, pdk, map]);
-
-  return null;
-}
-
 // ─── Роза ветров ─────────────────────────────────────────────────────────────
 function WindRose({ windDirection, windSpeed }) {
   const size = 90;
@@ -613,9 +448,10 @@ const SourceMarker = React.memo(function SourceMarker({ src, i, onSourceMove }) 
       eventHandlers={{ dragend(e) { const ll = e.target.getLatLng(); onSourceMove(i, ll.lat, ll.lng); } }}
       icon={L.divIcon({
         html: `<div style="background:#7C2D12;color:#fff;border-radius:50%;
-          width:24px;height:24px;display:flex;align-items:center;justify-content:center;
-          font-size:12px;font-weight:bold;border:2px solid #fff;
-          box-shadow:0 2px 6px rgba(0,0,0,0.5);font-family:sans-serif;">${i + 1}</div>`,
+          min-width:24px;height:24px;padding:0 4px;box-sizing:border-box;border-radius:12px;
+          display:flex;align-items:center;justify-content:center;
+          font-size:12px;font-weight:bold;border:2px solid #fff;white-space:nowrap;
+          box-shadow:0 2px 6px rgba(0,0,0,0.5);font-family:sans-serif;">${sourceNumber(src, i)}</div>`,
         className: "",
         iconAnchor: [12, 12],
       })}
@@ -653,12 +489,6 @@ function ViewToggle({ mode, onChange }) {
         onClick={() => onChange("grid")}
       >
         ⊞ Сетка ОНД
-      </button>
-      <button
-        style={{ ...btnBase, background: mode === "isolines" ? "#2563EB" : "#fff", color: mode === "isolines" ? "#fff" : "#2563EB" }}
-        onClick={() => onChange("isolines")}
-      >
-        ∿ Изолинии
       </button>
     </div>
   );
@@ -875,15 +705,6 @@ export default function MapView({
         </Polygon>
       )}
 
-      {/* Изолинии */}
-      {viewMode === "isolines" && result?.points?.length > 0 && (
-        <IsolineOverlay
-          points={result.points}
-          maxC={result.max_c || 1}
-          pdk={currentPdk || result.pdk || 0.5}
-        />
-      )}
-
       {/* Кнопки переключения */}
       {result && <ViewToggle mode={viewMode} onChange={onViewModeChange} />}
 
@@ -893,7 +714,7 @@ export default function MapView({
       )}
 
       {/* Заголовок */}
-      {result && (viewMode === "grid" || viewMode === "isolines") && (
+      {result && viewMode === "grid" && (
         <MapTitle enterprise={enterprise} substance={substance} gridXLength={gridXLength} gridYLength={gridYLength} />
       )}
 

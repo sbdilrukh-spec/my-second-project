@@ -1,127 +1,70 @@
 """
-Расчёт рассеивания загрязняющих веществ в атмосфере по методике ОНД-86.
-(Общесоюзный нормативный документ — Приказ МПР №273)
+Расчёт рассеивания загрязняющих веществ в атмосфере по методике ОНД-86
+(Госкомгидромет СССР, 1987), раздел 2.
 
-Основные формулы: Берлянд М.Е., 1975 / ОНД-86 раздел 2.
+Формулы: (2.1)–(2.22) — Cm, xm, um; (2.23а–г) s1; (2.24) низкие источники;
+(2.28) s2; (2.29)–(2.30) — концентрация при скорости ветра u ≠ um.
+В каждой точке сетки, как в «Радуге», перебираются направления и скорости
+ветра (0,5 м/с … U*), и берётся максимум суммарной концентрации; запоминаются
+опасные направление HB и скорость U.
+
+Координаты внутри расчёта — метры: x на восток, y на север. Направление ветра
+θ — откуда дует (метеорологическое), факел идёт в сторону θ+180°.
 """
 
+import math
+import re
 import numpy as np
-from .meteo_data import STABILITY_SIGMA
 
-# Коэффициент оседания — F=1 для газов и мелкодисперсных частиц (<10 мкм)
+from .ond86_kernel import HAVE_NUMBA
+if HAVE_NUMBA:
+    from .ond86_kernel import max_field as _kernel_max_field
+
+# Коэффициент оседания по умолчанию — газы и мелкодисперсные аэрозоли
 F_GAS = 1.0
 
-
-# ---------------------------------------------------------------------------
-# Вспомогательные функции s1, s2
-# ---------------------------------------------------------------------------
-
-def _s1_vectorized(r: np.ndarray) -> np.ndarray:
-    """
-    Нормированная функция осевой концентрации.
-    r = x / Xm   (отношение расстояния к расстоянию максимума)
-    Возвращает значения [0, 1]: при r=1 возвращает 1.
-    """
-    s = np.where(
-        r <= 0,
-        0.0,
-        np.where(
-            r <= 1.0,
-            3.0 * r ** 4 / (1.0 + 2.0 * r ** 4),
-            3.0 / (r ** 4 + 2.0),
-        ),
-    )
-    return s
-
-
-def _s2_vectorized(y: np.ndarray, x: np.ndarray, sigma_coeff: float) -> np.ndarray:
-    """
-    Нормированное распределение концентрации по перпендикуляру к ветру.
-    Гауссово приближение (ОНД-86, п. 2.16).
-    sigma_coeff = tan(β) — зависит от класса устойчивости.
-    """
-    sigma_y = np.maximum(np.abs(x) * sigma_coeff, 0.5)
-    return np.exp(-0.5 * (y / sigma_y) ** 2)
+# Шаг грубого перебора направлений и полуширина уточнения (градусы)
+_DIR_STEP_COARSE = 10
+_DIR_REFINE_HALF = 9
 
 
 # ---------------------------------------------------------------------------
-# Площадной источник: разбиение на сетку точечных подысточников
+# Номер источника
 # ---------------------------------------------------------------------------
 
-def _subsource_offsets(src):
+def source_number(src, index: int) -> str:
     """
-    Возвращает смещения (dx_восток, dy_север) в метрах от центра источника
-    для каждого точечного подысточника.
-
-    Для трубного (точечного) источника — единственная точка [(0, 0)].
-    Для площадного (source_type == "area") — центры ячеек равномерной сетки
-    N×N внутри прямоугольника L×W, повёрнутого на area_angle.
+    Номер источника, который задал пользователь (0001, 6001, ...). Если не
+    задан: число в начале названия («0001», «№154 ДСК») считается номером,
+    иначе — порядковый номер в списке (01, 02, …). То же правило на
+    фронтенде (sourceNumber.js).
     """
-    if getattr(src, "source_type", "stack") != "area":
-        return [(0.0, 0.0)]
-
-    L = getattr(src, "area_length", None) or 0.0
-    W = getattr(src, "area_width", None) or 0.0
-    if L <= 0 or W <= 0:
-        return [(0.0, 0.0)]
-
-    n = int(getattr(src, "area_subdivisions", None) or 5)
-    n = max(1, min(n, 20))  # ограничиваем 20×20=400 подысточников
-
-    ang = np.radians(getattr(src, "area_angle", None) or 0.0)
-    cos_a, sin_a = np.cos(ang), np.sin(ang)
-
-    offsets = []
-    for i in range(n):
-        u = -L / 2.0 + L * (i + 0.5) / n   # вдоль длины
-        for j in range(n):
-            v = -W / 2.0 + W * (j + 0.5) / n  # вдоль ширины
-            dx = u * cos_a - v * sin_a
-            dy = u * sin_a + v * cos_a
-            offsets.append((float(dx), float(dy)))
-    return offsets
+    num = getattr(src, "number", None)
+    if num is not None and str(num).strip():
+        return str(num).strip()
+    # Старые проекты: номер записан в начале названия («0001», «№154 ДСК №2»)
+    name = str(getattr(src, "name", "") or "")
+    m = _NAME_NUMBER.match(name)
+    if m:
+        return m.group(1)
+    return f"{index + 1:02d}"
 
 
-def _source_contribution(src, Cm, Xm, sigma_coeff, wd_rad, grid_lats, grid_lons):
-    """
-    Вклад источника (точечного или площадного) в концентрацию по массиву точек.
-
-    Cm/Xm рассчитаны по полному выбросу M источника. Для площадного источника
-    выброс делится поровну между N подысточниками (Cm ∝ M, поэтому Cm_sub = Cm/N),
-    а Xm от выброса не зависит и одинаков для всех подысточников. Итоговое поле —
-    сумма гауссовых вкладов всех подысточников (суперпозиция, ОНД-86).
-    """
-    offsets = _subsource_offsets(src)
-    n_sub = len(offsets)
-    Cm_sub = Cm / n_sub
-
-    src_lat_rad = src.lat * np.pi / 180.0
-    cos_lat = np.cos(src_lat_rad)
-
-    total = np.zeros(len(grid_lats))
-    for ox, oy in offsets:
-        sub_lat = src.lat + oy / 111_000.0
-        sub_lon = src.lon + ox / (111_000.0 * cos_lat)
-
-        dx_e = (grid_lons - sub_lon) * 111_000.0 * cos_lat
-        dy_n = (grid_lats - sub_lat) * 111_000.0
-
-        # Поворот в систему «по ветру»
-        x_wind = -(dx_e * np.sin(wd_rad) + dy_n * np.cos(wd_rad))
-        y_wind = dx_e * np.cos(wd_rad) - dy_n * np.sin(wd_rad)
-
-        pos = x_wind > 0
-        r = np.where(pos, x_wind / Xm, 0.0)
-        s1 = _s1_vectorized(r)
-        s2 = np.where(pos, _s2_vectorized(y_wind, x_wind, sigma_coeff), 0.0)
-        total += Cm_sub * s1 * s2
-
-    return total
+_NAME_NUMBER = re.compile(r"^\s*(?:№|N|#)?\s*(\d+)(?!\d)")
 
 
 # ---------------------------------------------------------------------------
-# Расчёт параметров одного источника (Cm, Xm)
+# Параметры одиночного источника: Cm, xm, um (ОНД-86, п. 2.1–2.22)
 # ---------------------------------------------------------------------------
+
+def _n_coef(v: float) -> float:
+    """Коэффициент n по vm или v'm (2.7б, 2.7в)."""
+    if v >= 2.0:
+        return 1.0
+    if v >= 0.5:
+        return 0.532 * v * v - 2.13 * v + 3.13
+    return 4.4 * v
+
 
 def calc_source_params(
     M: float,   # г/с
@@ -130,236 +73,338 @@ def calc_source_params(
     w0: float,  # м/с
     Tg: float,  # °C
     Ta: float,  # °C
-    A: float,   # климатический коэффициент
+    A: float,   # коэффициент стратификации
     F: float = F_GAS,
     eta: float = 1.0,  # коэффициент рельефа
 ) -> dict:
-    """
-    Вычисляет Cm (г/м³) и Xm (м) по ОНД-86.
-    """
-    dT = Tg - Ta
-    V1 = np.pi / 4.0 * D ** 2 * w0   # объёмный расход, м³/с
+    """Cm (мг/м³), Xm (м), Um (м/с) и промежуточные величины по ОНД-86."""
+    H = max(float(H or 0.0), 0.5)
+    D = max(float(D or 0.0), 0.0)
+    w0 = max(float(w0 or 0.0), 0.0)
+    F = float(F or F_GAS)
+    V1 = math.pi * D * D / 4.0 * w0
+    dT = float(Tg) - float(Ta)
+    vmp = 1.3 * w0 * D / H                       # (2.5) v'm
+    fe = 800.0 * vmp ** 3                        # (2.6)
+    hot = dT > 0.0 and V1 > 0.0
+    f = 1000.0 * w0 * w0 * D / (H * H * dT) if hot else float("inf")
 
-    if dT < 0.5 or V1 < 1e-4:
-        return _cold_source(M, H, D, w0, A, F, eta)
-
-    # --- Горячий источник ---
-    f = 1000.0 * w0 ** 2 * D / (H ** 2 * dT)
-    vm = 0.65 * (V1 * dT / H) ** (1.0 / 3.0)
-    vm_prime = 1.3 * w0 * D / H
-
-    # Коэффициент m
-    if f < 100:
-        m = 1.0 / (0.67 + 0.1 * f ** 0.5 + 0.34 * f ** (1.0 / 3.0))
+    if hot and f < 100.0:
+        vm = 0.65 * (V1 * dT / H) ** (1.0 / 3.0)                           # (2.3)
+        m = 1.0 / (0.67 + 0.1 * math.sqrt(f) + 0.34 * f ** (1.0 / 3.0))   # (2.7а)
+        if vm >= 0.5:
+            vn = vmp if fe < f else vm             # п. 2.4: fe < f < 100 → n по v'm
+            n = _n_coef(vn)
+            Cm = A * M * F * m * n * eta / (H * H * (V1 * dT) ** (1.0 / 3.0))  # (2.1)
+            if vm <= 2.0:
+                d = 4.95 * vm * (1.0 + 0.28 * f ** (1.0 / 3.0))             # (2.14)
+                um = vm                                                     # (2.17)
+            else:
+                d = 7.0 * math.sqrt(vm) * (1.0 + 0.28 * f ** (1.0 / 3.0))  # (2.15)
+                um = vm * (1.0 + 0.12 * math.sqrt(f))                       # (2.18)
+            branch = "hot"
+        else:
+            n = None
+            m = 2.86 * m                                                    # (2.10)
+            Cm = A * M * F * m * eta / H ** (7.0 / 3.0)                     # (2.9)
+            d = 2.48 * (1.0 + 0.28 * fe ** (1.0 / 3.0))                     # (2.13)
+            um = 0.5                                                        # (2.16)
+            branch = "hot_weak"
     else:
-        fe = 800.0 * (w0 / (w0 + 3.0)) ** 3
-        m = 1.47 / (1.0 + 0.28 * fe ** (1.0 / 3.0))
+        # f ≥ 100 или ΔT ≈ 0 — холодный выброс, п. 2.6–2.8
+        vm = None
+        if vmp >= 0.5 and V1 > 0.0:
+            m = None
+            n = _n_coef(vmp)
+            K = D / (8.0 * V1)                                              # (2.8)
+            Cm = A * M * F * n * eta * K / H ** (4.0 / 3.0)                 # (2.8а)
+            if vmp <= 2.0:
+                d = 11.4 * vmp                                              # (2.20)
+                um = vmp                                                    # (2.22)
+            else:
+                d = 16.0 * math.sqrt(vmp)                                   # (2.21)
+                um = 2.2 * vmp                                              # (2.22а)
+            branch = "cold"
+        else:
+            n = None
+            m = 0.9                                                         # (2.10а)
+            Cm = A * M * F * m * eta / H ** (7.0 / 3.0)
+            d = 5.7                                                         # (2.19)
+            um = 0.5
+            branch = "cold_weak"
 
-    # Коэффициент n
-    if vm >= 2.0:
-        n = 1.0
-    elif vm >= 0.5:
-        n = 0.532 * vm ** 2 - 2.13 * vm + 3.13
-    else:
-        n = 4.4 * vm
-
-    # Максимальная приземная концентрация (г/м³)
-    Cm = A * M * F * m * n * eta / (H ** 2 * (V1 * dT) ** (1.0 / 3.0))
-
-    # Расстояние до максимума (м)
-    if f < 100:
-        vm_use = vm
-    else:
-        vm_use = vm_prime
-
-    if vm_use >= 2.0:
-        d = 7.0 * (1.0 + 0.28 * f ** (1.0 / 3.0))
-    elif vm_use >= 0.5:
-        d = 4.95 * vm_use * (1.0 + 0.28 * f ** (1.0 / 3.0))
-    else:
-        d = 5.0 * F
-
-    Xm = d * H
-
+    Xm = d * H if F < 2.0 else (5.0 - F) / 4.0 * d * H                     # (2.12)
     return {
-        "Cm": float(Cm),
-        "Xm": float(Xm),
-        "type": "hot",
-        "f": float(f),
-        "vm": float(vm),
-        "m": float(m),
-        "n": float(n),
-        "V1": float(V1),
-        "dT": float(dT),
-    }
-
-
-def _cold_source(M, H, D, w0, A, F, eta) -> dict:
-    """Холодный источник (ΔТ ≈ 0) — ОНД-86, п. 2.6."""
-    V1 = np.pi / 4.0 * D ** 2 * w0
-    vm_prime = 1.3 * w0 * D / H
-    fe = 800.0 * (w0 / (w0 + 3.0)) ** 3
-    m = 1.47 / (1.0 + 0.28 * fe ** (1.0 / 3.0))
-
-    if vm_prime >= 2.0:
-        n = 1.0
-        d = 14.0 * (1.0 + 0.28 * fe ** (1.0 / 3.0))
-    elif vm_prime >= 0.5:
-        n = 0.532 * vm_prime ** 2 - 2.13 * vm_prime + 3.13
-        d = 9.9 * vm_prime * (1.0 + 0.28 * fe ** (1.0 / 3.0))
-    else:
-        n = 4.4 * vm_prime
-        d = 5.6 * F
-
-    Cm = A * M * F * m * n * eta / (H ** 2 * max(V1, 1e-6) ** (2.0 / 3.0))
-    Xm = d * H
-
-    return {
-        "Cm": float(Cm),
-        "Xm": float(Xm),
-        "type": "cold",
-        "vm_prime": float(vm_prime),
-        "m": float(m),
-        "n": float(n),
-        "V1": float(V1),
+        "Cm": float(Cm), "Xm": float(Xm), "Um": float(um), "type": branch,
+        "f": None if f == float("inf") else float(f), "vm": vm, "vm_prime": float(vmp),
+        "m": m, "n": n, "d": float(d), "V1": float(V1), "dT": float(dT),
+        "F": F, "H": H,
     }
 
 
 # ---------------------------------------------------------------------------
-# Расчёт поля концентраций на сетке (векторизованный)
+# Безразмерные функции ОНД-86
 # ---------------------------------------------------------------------------
 
-def _compute_single_direction(sources, sigma_coeff, A, Ta, wd_rad, grid_lats, grid_lons):
-    """
-    Рассчитывает поле концентраций для одного направления ветра.
-    Возвращает total_c (мг/м³) и src_results [{name, cm_mg, xm}, ...].
-    """
-    total_c = np.zeros(len(grid_lats))
-    src_results = []
+def _r_coef(q):
+    """(2.29) Cmu = r·Cm, q = u/um."""
+    q = np.asarray(q, dtype=float)
+    return np.where(q <= 1.0, 0.67 * q + 1.67 * q ** 2 - 1.34 * q ** 3,
+                    3.0 * q / (2.0 * q ** 2 - q + 2.0))
 
-    for src in sources:
+
+def _p_coef(q):
+    """(2.30) xmu = p·xm."""
+    q = np.asarray(q, dtype=float)
+    return np.where(q <= 0.25, 3.0,
+                    np.where(q <= 1.0, 8.43 * (1.0 - q) ** 5 + 1.0, 0.32 * q + 0.68))
+
+
+def _s1(t: np.ndarray, F: float, H: float) -> np.ndarray:
+    """(2.23а–г) по оси факела, с поправкой (2.24) для низких источников."""
+    s = np.zeros_like(t)
+    a = (t > 0) & (t <= 1)
+    ta = t[a]
+    sa = 3 * ta ** 4 - 8 * ta ** 3 + 6 * ta ** 2
+    if H < 10.0:
+        h = max(H, 2.0)
+        sa = 0.125 * (10.0 - h) + 0.125 * (h - 2.0) * sa                    # (2.24)
+    s[a] = sa
+    b = (t > 1) & (t <= 8)
+    s[b] = 1.13 / (0.13 * t[b] ** 2 + 1.0)
+    c = t > 8
+    tc = t[c]
+    if F <= 1.5:
+        s[c] = tc / (3.58 * tc ** 2 - 35.2 * tc + 120.0)
+    else:
+        s[c] = 1.0 / (0.1 * tc ** 2 + 2.47 * tc - 17.8)
+    return s
+
+
+# ---------------------------------------------------------------------------
+# Подготовка источников и поле одного источника
+# ---------------------------------------------------------------------------
+
+def _subsource_offsets(src):
+    """
+    Смещения (dx на восток, dy на север, м) точечных подысточников от центра.
+    Трубный источник — одна точка; площадной (source_type == "area") —
+    центры ячеек сетки N×N внутри прямоугольника L×W, повёрнутого на
+    area_angle (от оси X на восток, против часовой стрелки).
+    """
+    if getattr(src, "source_type", "stack") != "area":
+        return [(0.0, 0.0)]
+    L = getattr(src, "area_length", None) or 0.0
+    W = getattr(src, "area_width", None) or 0.0
+    if L <= 0 or W <= 0:
+        return [(0.0, 0.0)]
+    n = int(getattr(src, "area_subdivisions", None) or 5)
+    n = max(1, min(n, 20))
+    ang = math.radians(getattr(src, "area_angle", None) or 0.0)
+    cos_a, sin_a = math.cos(ang), math.sin(ang)
+    offsets = []
+    for i in range(n):
+        u = -L / 2.0 + L * (i + 0.5) / n
+        for j in range(n):
+            v = -W / 2.0 + W * (j + 0.5) / n
+            offsets.append((u * cos_a - v * sin_a, u * sin_a + v * cos_a))
+    return offsets
+
+
+class _Frame:
+    """Локальная система координат в метрах вокруг центра (lat0, lon0)."""
+
+    def __init__(self, lat0: float, lon0: float):
+        self.lat0 = lat0
+        self.lon0 = lon0
+        self.kx = 111_000.0 * math.cos(math.radians(lat0))
+        self.ky = 111_000.0
+
+    def to_xy(self, lat, lon):
+        return (np.asarray(lon) - self.lon0) * self.kx, (np.asarray(lat) - self.lat0) * self.ky
+
+
+def _prepare_sources(sources, Ta, A, frame: _Frame):
+    """Параметры ОНД-86 и координаты подысточников для каждого источника."""
+    prepared = []
+    for idx, src in enumerate(sources):
         M = src.get_emission_gs()
         if M <= 0:
             continue
-
-        params = calc_source_params(
-            M=M,
-            H=src.height,
-            D=src.diameter,
-            w0=src.velocity,
-            Tg=src.temperature,
-            Ta=Ta,
-            A=A,
-        )
-
-        Cm = params["Cm"]
-        Xm = params["Xm"]
-
-        if Cm <= 0 or Xm <= 0:
-            src_results.append({
-                "name": src.name,
-                "cm_mg": round(Cm, 6),
-                "xm": round(Xm, 1),
-            })
-            continue
-
-        # Вклад источника (для площадного — сумма по сетке подысточников).
-        # Ветер дует ОТ направления wind_direction → факел идёт В сторону wind_direction+180°
-        contrib = _source_contribution(
-            src, Cm, Xm, sigma_coeff, wd_rad, grid_lats, grid_lons,
-        )
-        total_c += contrib
-
-        # Для точечного источника Cm — аналитический максимум ОНД-86.
-        # Для площадного аналитический Cm относится к полному выбросу из одной
-        # точки и завышен; отчётным берём фактический максимум приземного поля
-        # самого источника (распределённого по площадке).
-        is_area = getattr(src, "source_type", "stack") == "area"
-        reported_cm = float(contrib.max()) if is_area else Cm
-        src_results.append({
-            "name": src.name,
-            "cm_mg": round(reported_cm, 6),   # формула ОНД-86 уже даёт мг/м³
-            "xm": round(Xm, 1),
+        F = getattr(src, "F", None) or F_GAS
+        pr = calc_source_params(M=M, H=src.height, D=src.diameter, w0=src.velocity,
+                                Tg=src.temperature, Ta=Ta, A=A, F=F)
+        x0, y0 = frame.to_xy(src.lat, src.lon)
+        offs = _subsource_offsets(src)
+        prepared.append({
+            "src": src, "index": idx, "pr": pr,
+            "sx": np.array([float(x0) + o[0] for o in offs]),
+            "sy": np.array([float(y0) + o[1] for o in offs]),
+            "w": 1.0 / len(offs),
         })
+    return prepared
 
-    return total_c, src_results
 
-
-def _per_source_at_point(sources, sigma_coeff, A, Ta, wd_rad, target_lat, target_lon):
+def _source_field(p, px, py, ex, ey, u):
     """
-    Для одной точки (target_lat, target_lon) и одного направления ветра wd_rad
-    возвращает список вкладов от каждого источника:
-        [{"name": str, "src_index": int, "contribution_mg": float}, ...]
-    Используется при формировании Таблицы 13 «Наибольшие концентрации».
+    Концентрация (мг/м³) от одного источника.
+    px, py — (N,1); ex, ey — единичный вектор факела, (1,K) или (N,K);
+    u — скорость ветра, скаляр или (N,1). Результат — (N,K).
     """
-    contributions = []
-    for src_idx, src in enumerate(sources):
-        M = src.get_emission_gs()
-        if M <= 0:
-            contributions.append({"name": src.name, "src_index": src_idx, "contribution_mg": 0.0})
-            continue
+    pr = p["pr"]
+    q = u / pr["Um"]
+    Cmu = _r_coef(q) * pr["Cm"]
+    xmu = _p_coef(q) * pr["Xm"]
+    k = np.minimum(u, 5.0)
+    total = None
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        for sx, sy in zip(p["sx"], p["sy"]):
+            dx = px - sx
+            dy = py - sy
+            xa = dx * ex + dy * ey                 # вдоль факела
+            ya = dx * ey - dy * ex                 # поперёк факела
+            pos = xa > 0
+            t = np.where(pos, xa / xmu, 0.0)
+            s1 = _s1(t, pr["F"], pr["H"])
+            ty = np.where(pos, k * ya * ya / np.where(pos, xa * xa, 1.0), 0.0)   # (2.28)
+            s2 = 1.0 / (1.0 + 5 * ty + 12.8 * ty ** 2 + 17 * ty ** 3 + 45.1 * ty ** 4) ** 2
+            c = np.where(pos, s1 * s2, 0.0)
+            total = c if total is None else total + c
+    return Cmu * p["w"] * total
 
-        params = calc_source_params(
-            M=M, H=src.height, D=src.diameter, w0=src.velocity,
-            Tg=src.temperature, Ta=Ta, A=A,
+
+def _plume_vectors(theta_deg):
+    th = np.radians(theta_deg)
+    return -np.sin(th), -np.cos(th)
+
+
+def _wind_speeds(prepared, u_star: float):
+    """Перебираемые скорости: 0,5 м/с … U* с шагом 0,5 плюс um источников."""
+    u_star = max(float(u_star or 0.0), 0.5)
+    speeds = set(np.round(np.arange(0.5, u_star + 1e-9, 0.5), 2).tolist())
+    speeds.add(round(u_star, 2))
+    ums = {round(min(max(p["pr"]["Um"], 0.5), u_star), 2) for p in prepared}
+    if len(ums) > 30:
+        ums = {round(v * 4) / 4 for v in ums}
+    speeds |= ums
+    return sorted(speeds)
+
+
+def _max_field(prepared, px, py, speeds, fixed_dir=None):
+    """
+    Максимум суммарной концентрации по направлениям и скоростям ветра.
+    Возвращает (c_max, dir_deg, u) для каждой точки. Основной путь — ядро
+    numba (ond86_kernel); без numba — тот же перебор на numpy.
+    """
+    if HAVE_NUMBA and prepared:
+        def cat(fn):
+            return np.concatenate([fn(p) for p in prepared]).astype(np.float64)
+        SX = cat(lambda p: p["sx"])
+        SY = cat(lambda p: p["sy"])
+        CMW = cat(lambda p: np.full(len(p["sx"]), p["pr"]["Cm"] * p["w"]))
+        XM = cat(lambda p: np.full(len(p["sx"]), p["pr"]["Xm"]))
+        UM = cat(lambda p: np.full(len(p["sx"]), p["pr"]["Um"]))
+        FS = cat(lambda p: np.full(len(p["sx"]), p["pr"]["F"]))
+        HS = cat(lambda p: np.full(len(p["sx"]), p["pr"]["H"]))
+        if fixed_dir is not None:
+            dirs = np.array([float(fixed_dir) % 360.0])
+        else:
+            dirs = np.arange(0, 360, _DIR_STEP_COARSE, dtype=np.float64)
+        best, bdir, bu = _kernel_max_field(
+            np.ascontiguousarray(px, dtype=np.float64), np.ascontiguousarray(py, dtype=np.float64),
+            SX, SY, CMW, XM, UM, FS, HS,
+            np.asarray(speeds, dtype=np.float64), float(max(speeds)),
+            dirs, _DIR_REFINE_HALF,
         )
-        Cm = params["Cm"]
-        Xm = params["Xm"]
-        if Cm <= 0 or Xm <= 0:
-            contributions.append({"name": src.name, "src_index": src_idx, "contribution_mg": 0.0})
-            continue
+        bdir = np.where(best > 0, np.round(bdir) % 360, -1)
+        return best, bdir, bu
+    return _max_field_numpy(prepared, px, py, speeds, fixed_dir)
 
-        # Вклад в одной точке (для площадного — сумма по подысточникам).
-        c_arr = _source_contribution(
-            src, Cm, Xm, sigma_coeff, wd_rad,
-            np.array([target_lat]), np.array([target_lon]),
-        )
-        c_mg = float(c_arr[0])
-        contributions.append({"name": src.name, "src_index": src_idx, "contribution_mg": c_mg})
 
-    return contributions
+def _max_field_numpy(prepared, px, py, speeds, fixed_dir=None):
+    """Запасной перебор на numpy (если нет numba)."""
+    npt = len(px)
+    pxc = px[:, None]
+    pyc = py[:, None]
+    best = np.zeros(npt)
+    bdir = np.full(npt, -1.0)
+    bu = np.zeros(npt)
+
+    def scan(theta):   # theta: (1,K) или (N,K)
+        ex, ey = _plume_vectors(theta)
+        for u in speeds:
+            tot = None
+            for p in prepared:
+                c = _source_field(p, pxc, pyc, ex, ey, u)
+                tot = c if tot is None else tot + c
+            j = np.argmax(tot, axis=1)
+            v = tot[np.arange(npt), j]
+            upd = v > best
+            best[upd] = v[upd]
+            bdir[upd] = np.broadcast_to(theta, tot.shape)[np.arange(npt), j][upd]
+            bu[upd] = u
+
+    if not prepared:
+        return best, bdir, bu
+    if fixed_dir is not None:
+        scan(np.array([[float(fixed_dir)]]))
+    else:
+        scan(np.arange(0, 360, _DIR_STEP_COARSE, dtype=float)[None, :])
+        # Уточнение направления с шагом 1° вокруг найденного максимума
+        offs = np.arange(-_DIR_REFINE_HALF, _DIR_REFINE_HALF + 1, dtype=float)[None, :]
+        scan((bdir[:, None] + offs) % 360.0)
+    bdir = np.where(best > 0, np.round(bdir) % 360, -1)
+    return best, bdir, bu
+
+
+def _contributions_at(prepared, x, y, theta, u):
+    """Вклады источников (мг/м³) в точках x, y при направлении theta и скорости u."""
+    ex, ey = _plume_vectors(np.asarray(theta, float)[:, None])
+    xc = np.asarray(x, float)[:, None]
+    yc = np.asarray(y, float)[:, None]
+    uc = np.asarray(u, float)[:, None]
+    return [(p, _source_field(p, xc, yc, ex, ey, uc)[:, 0]) for p in prepared]
+
+
+# ---------------------------------------------------------------------------
+# Расчёт поля на сетке
+# ---------------------------------------------------------------------------
+
+def _grid_center(sources):
+    return (sum(s.lat for s in sources) / len(sources),
+            sum(s.lon for s in sources) / len(sources))
 
 
 def compute_grid(sources, meteo, city_data: dict,
-                  grid_radius: float = None, grid_step: float = 500,
-                  x_length: float = None, y_length: float = None,
-                  source_offset_x: float = None, source_offset_y: float = None):
+                 grid_radius: float = None, grid_step: float = 500,
+                 x_length: float = None, y_length: float = None,
+                 source_offset_x: float = None, source_offset_y: float = None,
+                 center_lat: float = None, center_lon: float = None):
     """
-    Рассчитывает приземные концентрации на регулярной сетке.
+    Приземные концентрации на регулярной сетке (начало (0,0) — нижний левый
+    угол, источник/центр — в точке (source_offset_x, source_offset_y)).
 
-    Новая система координат: начало (0,0) в нижнем левом углу.
-    Источник расположен в (source_offset_x, source_offset_y).
+    center_lat/center_lon — точка привязки сетки. По умолчанию — центроид
+    переданных источников; многовеществный расчёт передаёт центроид ВСЕХ
+    источников проекта, чтобы сетка была общей для всех веществ.
 
-    Режимы:
-        wind_mode="360"    — 36 направлений (шаг 10°), MAX в каждой точке (ОВОС)
-        wind_mode="single" — одно направление ветра
+    Режимы: wind_mode="360" — перебор направлений; "single" — одно направление.
+    Скорость ветра всегда перебирается от 0,5 м/с до U* (meteo.wind_speed).
 
-    Возвращает:
-        lats      np.ndarray  — широты точек сетки
-        lons      np.ndarray  — долготы точек сетки
-        total_mg  np.ndarray  — суммарная концентрация, мг/м³
-        src_results list[dict]
+    Возвращает lats, lons, total_mg, src_results, dir_at_max, u_at_max.
     """
     A = city_data.get("A", 200)
-    sigma_coeff = STABILITY_SIGMA.get(meteo.stability_class, 0.08)
     wind_mode = getattr(meteo, "wind_mode", "360")
 
-    # ---------- Построение сетки ----------
-    center_lat = sum(s.lat for s in sources) / len(sources)
-    center_lon = sum(s.lon for s in sources) / len(sources)
+    if center_lat is None or center_lon is None:
+        center_lat, center_lon = _grid_center(sources)
 
-    # Обратная совместимость: если передан radius, конвертируем в x_length/y_length
     if x_length is None and grid_radius is not None:
-        x_length = grid_radius * 2
-        y_length = grid_radius * 2
-        source_offset_x = grid_radius
-        source_offset_y = grid_radius
+        x_length = y_length = grid_radius * 2
+        source_offset_x = source_offset_y = grid_radius
     elif x_length is None:
-        x_length = 7000
-        y_length = 7000
-        source_offset_x = 3500
-        source_offset_y = 3500
-
+        x_length = y_length = 7000
+        source_offset_x = source_offset_y = 3500
     if y_length is None:
         y_length = x_length
     if source_offset_x is None:
@@ -367,60 +412,46 @@ def compute_grid(sources, meteo, city_data: dict,
     if source_offset_y is None:
         source_offset_y = y_length / 2
 
-    lat_rad_center = center_lat * np.pi / 180.0
-
-    # Начало координат (нижний левый угол) в географических координатах
-    origin_lat = center_lat - source_offset_y / 111_000.0
-    origin_lon = center_lon - source_offset_x / (111_000.0 * np.cos(lat_rad_center))
-
-    # Сетка от 0 до x_length / y_length
+    frame = _Frame(center_lat, center_lon)
     n_x = int(x_length / grid_step) + 1
     n_y = int(y_length / grid_step) + 1
-    x_offsets = np.arange(n_x) * grid_step  # [0, step, 2*step, ..., x_length]
-    y_offsets = np.arange(n_y) * grid_step  # [0, step, 2*step, ..., y_length]
+    gx, gy = np.meshgrid(np.arange(n_x) * grid_step - source_offset_x,
+                         np.arange(n_y) * grid_step - source_offset_y)
+    px = gx.flatten().astype(float)
+    py = gy.flatten().astype(float)
+    grid_lats = center_lat + py / frame.ky
+    grid_lons = center_lon + px / frame.kx
 
-    dx_e_2d, dy_n_2d = np.meshgrid(x_offsets, y_offsets)
+    prepared = _prepare_sources(sources, meteo.temperature, A, frame)
+    speeds = _wind_speeds(prepared, meteo.wind_speed)
+    fixed = meteo.wind_direction if wind_mode == "single" else None
+    total_mg, dir_at_max, u_at_max = _max_field(prepared, px, py, speeds, fixed)
 
-    grid_lats = (origin_lat + dy_n_2d / 111_000.0).flatten()
-    grid_lons = (origin_lon + dx_e_2d / (111_000.0 * np.cos(lat_rad_center))).flatten()
+    # Параметры источников для таблиц: Cm, Xm, Um по ОНД-86. Для площадного
+    # аналитический Cm относится к выбросу из одной точки и завышен — отчётным
+    # берём максимум его собственного поля на сетке при опасной скорости.
+    src_results = []
+    for p in prepared:
+        pr = p["pr"]
+        cm = pr["Cm"]
+        if len(p["sx"]) > 1:
+            ex, ey = _plume_vectors(np.arange(0, 360, _DIR_STEP_COARSE, dtype=float)[None, :])
+            own = _source_field(p, px[:, None], py[:, None], ex, ey, pr["Um"])
+            cm = float(own.max()) if own.size else cm
+        src_results.append({
+            "name": p["src"].name,
+            "number": getattr(p["src"], "number", None),
+            "cm_mg": round(cm, 6),
+            "xm": round(pr["Xm"], 1),
+            "um": round(pr["Um"], 2),
+        })
 
-    if wind_mode == "360":
-        # ---------- Полный обзор 360° ----------
-        # 36 направлений с шагом 10°, в каждой точке берём МАКСИМУМ
-        # и запоминаем то направление, при котором максимум достигнут.
-        n_pts = len(grid_lats)
-        total_c_max = np.zeros(n_pts)
-        dir_at_max = np.full(n_pts, -1, dtype=int)  # угол в градусах, -1 = "никакое"
-        src_results = None
+    return grid_lats, grid_lons, total_mg, src_results, dir_at_max, u_at_max
 
-        for angle_deg in range(0, 360, 10):
-            wd_rad = angle_deg * np.pi / 180.0
-            c_dir, sr = _compute_single_direction(
-                sources, sigma_coeff, A, meteo.temperature, wd_rad,
-                grid_lats, grid_lons,
-            )
-            higher = c_dir > total_c_max
-            total_c_max = np.where(higher, c_dir, total_c_max)
-            dir_at_max = np.where(higher, angle_deg, dir_at_max)
-            if src_results is None:
-                src_results = sr  # параметры Cm/Xm не зависят от направления
 
-        total_mg = total_c_max
-    else:
-        # ---------- Одно направление ----------
-        wd_rad = meteo.wind_direction * np.pi / 180.0
-        total_c, src_results = _compute_single_direction(
-            sources, sigma_coeff, A, meteo.temperature, wd_rad,
-            grid_lats, grid_lons,
-        )
-        total_mg = total_c
-        dir_at_max = np.full(len(grid_lats), int(meteo.wind_direction), dtype=int)
-
-    if src_results is None:
-        src_results = []
-
-    return grid_lats, grid_lons, total_mg, src_results, dir_at_max
-
+# ---------------------------------------------------------------------------
+# Граница СЗЗ
+# ---------------------------------------------------------------------------
 
 def compute_szz_boundary(grid_lats, grid_lons, total_mg, pdk, center_lat, center_lon):
     """
@@ -500,20 +531,25 @@ def compute_szz_boundary(grid_lats, grid_lons, total_mg, pdk, center_lat, center
 
 
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
 # Многовеществный расчёт: один источник может выбрасывать N веществ.
-# Для каждого уникального вещества прогоняется отдельный compute_grid с
-# правильным emission_gs, и результаты собираются в словарь.
+# Для каждого вещества — отдельный compute_grid на ОБЩЕЙ сетке (привязка к
+# центроиду всех источников проекта), чтобы карты всех веществ совпадали
+# и ложились на одну подложку.
 # ---------------------------------------------------------------------------
 
 class _SubstanceSourceProxy:
-    """Лёгкий прокси: подсовывает compute_grid `get_emission_gs()` от одного вещества."""
+    """Лёгкий прокси: подсовывает compute_grid выброс одного вещества."""
 
-    __slots__ = ("name", "lat", "lon", "height", "diameter", "velocity",
+    __slots__ = ("name", "number", "lat", "lon", "height", "diameter", "velocity",
                  "temperature", "_emission_gs", "source_type", "area_length",
-                 "area_width", "area_angle", "area_subdivisions")
+                 "area_width", "area_angle", "area_subdivisions", "F")
 
-    def __init__(self, src, emission_gs: float, name: str = None):
-        self.name = name or src.name
+    def __init__(self, src, emission_gs: float, number: str, F: float = None):
+        self.name = src.name
+        self.number = number
         self.lat = src.lat
         self.lon = src.lon
         self.height = src.height
@@ -521,6 +557,7 @@ class _SubstanceSourceProxy:
         self.velocity = src.velocity
         self.temperature = src.temperature
         self._emission_gs = emission_gs
+        self.F = F or F_GAS
         # Параметры площадного источника — чтобы прокси тоже разворачивался в сетку
         self.source_type = getattr(src, "source_type", "stack")
         self.area_length = getattr(src, "area_length", None)
@@ -534,177 +571,94 @@ class _SubstanceSourceProxy:
 
 def compute_per_substance(sources, meteo, city_data, **grid_kwargs):
     """
-    Делает по отдельному расчёту на каждое вещество.
-    Возвращает dict со структурой:
-
+    Отдельный расчёт на каждое вещество. Возвращает:
       {
-        "by_substance": {
-          "<code>": {
-            "substance": {code, name, pdk_mr, hazard_class},
-            "pdk": float,
-            "max_c": float,
-            "max_lat": float,
-            "max_lon": float,
-            "exceeds_pdk": bool,
-            "ratio_to_pdk": float,
-            "source_results": [...],   # Cm/Xm на это вещество
-            "points": [{lat, lon, c}, ...],
-          },
-          ...
-        },
-        "primary_code": str,    # код вещества с худшим max_c/pdk
-        "lats": ndarray,        # общая сетка (одинаковая у всех веществ)
-        "lons": ndarray,
+        "by_substance": {code: {substance, pdk, max_c, max_lat, max_lon,
+                                exceeds_pdk, ratio_to_pdk, source_results,
+                                points: [{lat, lon, c, d, u}], top_points}},
+        "primary_code": str,   # вещество с худшим max_c/ПДК
+        "lats", "lons": ndarray (общая сетка для всех веществ)
       }
     """
-    # Собираем все (источник, выброс) пары, группируем по коду вещества
-    substance_groups = {}  # code -> {"substance": meta, "pairs": [(src, emission_gs)]}
-    for src in sources:
+    numbers = [source_number(s, i) for i, s in enumerate(sources)]
+    center_lat, center_lon = _grid_center(sources)
+    grid_kwargs = dict(grid_kwargs, center_lat=center_lat, center_lon=center_lon)
+    frame = _Frame(center_lat, center_lon)
+    A_factor = city_data.get("A", 200)
+
+    substance_groups = {}  # code -> {"substance", "pdk", "pairs": [(src, em_gs, number)]}
+    for src, number in zip(sources, numbers):
         for entry in src.get_emissions():
             em_gs = entry.get_emission_gs()
             if em_gs <= 0:
                 continue
             code = entry.get_substance_code()
-            if code not in substance_groups:
-                substance_groups[code] = {
-                    "substance": entry.substance,
-                    "pdk": entry.get_pdk(),
-                    "pairs": [],
-                }
-            substance_groups[code]["pairs"].append((src, em_gs))
-            # Если ПДК на разных строках одного вещества разные —
-            # берём минимальный (самый строгий)
+            group = substance_groups.setdefault(code, {
+                "substance": entry.substance, "pdk": entry.get_pdk(), "pairs": [],
+            })
+            group["pairs"].append((src, em_gs, number))
+            # Разные ПДК у одного вещества — берём самый строгий
             current_pdk = entry.get_pdk()
-            if current_pdk and current_pdk < substance_groups[code]["pdk"]:
-                substance_groups[code]["pdk"] = current_pdk
+            if current_pdk and current_pdk < group["pdk"]:
+                group["pdk"] = current_pdk
 
-    # Параметры для _per_source_at_point (нужны для top-N)
-    A_factor = city_data.get("A", 200)
-    sigma_coeff = STABILITY_SIGMA.get(meteo.stability_class, 0.08)
-
-    def _build_top_n(proxies_or_sources, lats_arr, lons_arr, total_mg_arr,
-                      dir_at_max_arr, pdk_value, top_n=10):
-        """Top-N точек по убыванию концентрации, с per-source вкладами в каждой."""
+    def build_top_n(proxies, lats_arr, lons_arr, total_mg_arr, dir_arr, u_arr,
+                    pdk_value, top_n=10):
+        """Top-N точек по убыванию концентрации с вкладами источников (Таблица 13)."""
         if len(total_mg_arr) == 0:
             return []
-        # Берём индексы top-N (по убыванию)
         n = min(top_n, len(total_mg_arr))
         top_idx = np.argpartition(-total_mg_arr, n - 1)[:n]
         top_idx = top_idx[np.argsort(-total_mg_arr[top_idx])]
 
-        # Координаты сетки в метрах от left-bottom угла (как в Радуге)
+        # Вклады источников при опасных направлении и скорости каждой точки
+        prepared = _prepare_sources(proxies, meteo.temperature, A_factor, frame)
+        x, y = frame.to_xy(lats_arr[top_idx], lons_arr[top_idx])
+        contribs = _contributions_at(prepared, x, y, dir_arr[top_idx], u_arr[top_idx])
+
+        # Координаты в метрах от левого-нижнего угла сетки (как X, Y в «Радуге»)
         origin_lat_grid = float(np.min(lats_arr))
         origin_lon_grid = float(np.min(lons_arr))
-        lat_rad_grid = origin_lat_grid * np.pi / 180.0
+        kx = 111_000.0 * np.cos(np.radians(origin_lat_grid))
 
         result = []
-        for idx in top_idx:
+        for k, idx in enumerate(top_idx):
             i = int(idx)
-            angle = int(dir_at_max_arr[i])
-            wd_rad = angle * np.pi / 180.0
-            point_lat = float(lats_arr[i])
-            point_lon = float(lons_arr[i])
             c_mg = float(total_mg_arr[i])
-            # Вклад каждого источника
-            contrib_list = _per_source_at_point(
-                proxies_or_sources, sigma_coeff, A_factor,
-                meteo.temperature, wd_rad, point_lat, point_lon,
+            angle = int(dir_arr[i])
+            items = sorted(
+                [(p, float(vals[k])) for p, vals in contribs if vals[k] > 0],
+                key=lambda pv: -pv[1],
             )
-            # Сортируем по убыванию вклада, фильтруем нулевые
-            contrib_sorted = sorted(
-                [c for c in contrib_list if c["contribution_mg"] > 0],
-                key=lambda c: -c["contribution_mg"],
-            )
-            # Метры от левого-нижнего угла сетки (как X, Y в Радуге)
-            x_m = (point_lon - origin_lon_grid) * 111_000.0 * np.cos(lat_rad_grid)
-            y_m = (point_lat - origin_lat_grid) * 111_000.0
             result.append({
                 "qh": (c_mg / pdk_value) if pdk_value > 0 else 0.0,
                 "c_mg": c_mg,
-                "x_m": round(x_m),
-                "y_m": round(y_m),
-                "lat": point_lat,
-                "lon": point_lon,
+                "x_m": int(round((float(lons_arr[i]) - origin_lon_grid) * kx)),
+                "y_m": int(round((float(lats_arr[i]) - origin_lat_grid) * 111_000.0)),
+                "lat": float(lats_arr[i]),
+                "lon": float(lons_arr[i]),
                 "wind_dir_deg": angle if angle >= 0 else None,
-                "wind_speed_ms": float(meteo.wind_speed),
+                "wind_speed_ms": float(u_arr[i]),
                 "contributions": [
                     {
-                        "src_index": c["src_index"],
-                        "name": c["name"],
-                        "contribution_mg": round(c["contribution_mg"], 6),
-                        "contribution_pdk": round(
-                            c["contribution_mg"] / pdk_value if pdk_value > 0 else 0.0, 6,
-                        ),
+                        "src_index": p["index"],
+                        "number": p["src"].number,
+                        "name": p["src"].name,
+                        "contribution_mg": round(v, 9),
+                        "contribution_pdk": round(v / pdk_value if pdk_value > 0 else 0.0, 9),
                     }
-                    for c in contrib_sorted
+                    for p, v in items
                 ],
             })
         return result
 
-    # Если ничего не задано — fallback к старой логике (один общий расчёт)
-    if not substance_groups:
-        lats, lons, total_mg, src_results, dir_at_max = compute_grid(
-            sources=sources, meteo=meteo, city_data=city_data, **grid_kwargs,
-        )
-        max_idx = int(total_mg.argmax()) if len(total_mg) else 0
-        max_c = float(total_mg[max_idx]) if len(total_mg) else 0.0
-        top_pts = _build_top_n(sources, lats, lons, total_mg, dir_at_max, 0.5)
-        return {
-            "by_substance": {
-                "unknown": {
-                    "substance": None,
-                    "pdk": 0.5,
-                    "max_c": max_c,
-                    "max_lat": float(lats[max_idx]) if len(lats) else 0.0,
-                    "max_lon": float(lons[max_idx]) if len(lons) else 0.0,
-                    "exceeds_pdk": max_c > 0.5,
-                    "ratio_to_pdk": max_c / 0.5 if max_c > 0 else 0.0,
-                    "source_results": src_results,
-                    "points": [
-                        {"lat": float(lats[i]), "lon": float(lons[i]), "c": float(total_mg[i])}
-                        for i in range(len(lats))
-                    ],
-                    "top_points": top_pts,
-                }
-            },
-            "primary_code": "unknown",
-            "lats": lats,
-            "lons": lons,
-        }
-
-    by_substance = {}
-    common_lats = None
-    common_lons = None
-
-    for code, group in substance_groups.items():
-        proxies = [_SubstanceSourceProxy(src, em_gs) for src, em_gs in group["pairs"]]
-        lats, lons, total_mg, src_results, dir_at_max = compute_grid(
+    def substance_result(proxies, sub_dict, pdk_value):
+        lats, lons, total_mg, src_results, dir_at_max, u_at_max = compute_grid(
             sources=proxies, meteo=meteo, city_data=city_data, **grid_kwargs,
         )
-        if common_lats is None:
-            common_lats = lats
-            common_lons = lons
-
         max_idx = int(total_mg.argmax()) if len(total_mg) else 0
         max_c = float(total_mg[max_idx]) if len(total_mg) else 0.0
-        pdk_value = float(group["pdk"]) if group["pdk"] else 0.5
-
-        # Готовим метаданные вещества
-        sub_meta = group["substance"]
-        sub_dict = None
-        if sub_meta is not None:
-            sub_dict = {
-                "code": sub_meta.code,
-                "name": sub_meta.name,
-                "pdk_mr": sub_meta.pdk_mr,
-                "pdk_ss": sub_meta.pdk_ss,
-                "hazard_class": sub_meta.hazard_class,
-            }
-
-        # Top-10 точек с вкладами источников (для Таблицы 13 «Наибольшие концентрации»)
-        top_pts = _build_top_n(proxies, lats, lons, total_mg, dir_at_max, pdk_value)
-
-        by_substance[code] = {
+        return lats, lons, {
             "substance": sub_dict,
             "pdk": pdk_value,
             "max_c": max_c,
@@ -714,16 +668,46 @@ def compute_per_substance(sources, meteo, city_data, **grid_kwargs):
             "ratio_to_pdk": (max_c / pdk_value) if pdk_value > 0 else 0.0,
             "source_results": src_results,
             "points": [
-                {"lat": float(lats[i]), "lon": float(lons[i]), "c": float(total_mg[i])}
+                {"lat": float(lats[i]), "lon": float(lons[i]), "c": float(total_mg[i]),
+                 "d": int(dir_at_max[i]), "u": float(u_at_max[i])}
                 for i in range(len(lats))
             ],
-            "top_points": top_pts,
+            "top_points": build_top_n(proxies, lats, lons, total_mg, dir_at_max,
+                                      u_at_max, pdk_value),
         }
 
-    # Главное вещество — с наибольшим отношением max_c / pdk
-    primary_code = max(by_substance.keys(),
-                       key=lambda k: by_substance[k]["ratio_to_pdk"])
+    # Ничего не задано — один общий расчёт по суммарному выбросу (старое поведение)
+    if not substance_groups:
+        proxies = [_SubstanceSourceProxy(s, s.get_emission_gs(), n)
+                   for s, n in zip(sources, numbers)]
+        lats, lons, data = substance_result(proxies, None, 0.5)
+        return {"by_substance": {"unknown": data}, "primary_code": "unknown",
+                "lats": lats, "lons": lons}
 
+    by_substance = {}
+    common_lats = common_lons = None
+    for code, group in substance_groups.items():
+        sub_meta = group["substance"]
+        F = getattr(sub_meta, "F", None) if sub_meta is not None else None
+        proxies = [_SubstanceSourceProxy(src, em_gs, number, F)
+                   for src, em_gs, number in group["pairs"]]
+        sub_dict = None
+        if sub_meta is not None:
+            sub_dict = {
+                "code": sub_meta.code,
+                "name": sub_meta.name,
+                "pdk_mr": sub_meta.pdk_mr,
+                "pdk_ss": sub_meta.pdk_ss,
+                "hazard_class": sub_meta.hazard_class,
+                "F": F,
+            }
+        pdk_value = float(group["pdk"]) if group["pdk"] else 0.5
+        lats, lons, data = substance_result(proxies, sub_dict, pdk_value)
+        if common_lats is None:
+            common_lats, common_lons = lats, lons
+        by_substance[code] = data
+
+    primary_code = max(by_substance.keys(), key=lambda k: by_substance[k]["ratio_to_pdk"])
     return {
         "by_substance": by_substance,
         "primary_code": primary_code,

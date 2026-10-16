@@ -4,13 +4,18 @@
 
 import csv
 import io
-from typing import List, Dict, Any
+import re
+from typing import List, Dict, Any, Iterable, Optional
 
 # Маппинг допустимых названий столбцов к каноническим
 COLUMN_MAP = {
-    # Название / номер
+    # Название
     "название": "name", "name": "name", "источник": "name", "source": "name",
-    "№": "name", "номер": "name", "number": "name", "n": "name",
+    "наименование": "name", "наименование источника": "name",
+    # Номер источника — тот, что пользователь сам присвоил (0001, 6001, ...)
+    "№": "number", "номер": "number", "number": "number", "n": "number",
+    "№ источника": "number", "номер источника": "number", "н ист.": "number",
+    "н ист": "number", "№ ист.": "number", "№ ист": "number",
     # Код вещества
     "код вещества": "substance_code", "код": "substance_code",
     "substance_code": "substance_code", "code": "substance_code",
@@ -41,384 +46,539 @@ COLUMN_MAP = {
     "выброс т/год": "emission_ty", "m год": "emission_ty", "m, т/год": "emission_ty",
     "emission_ty": "emission_ty", "т/год": "emission_ty",
     "выброс, т/год": "emission_ty",
-    # Координаты
-    "широта": "lat", "lat": "lat", "latitude": "lat",
+    # Координаты (десятичные градусы или градусы-минуты-секунды)
+    "широта": "lat", "lat": "lat", "latitude": "lat", "широта (n)": "lat",
+    "широта, с.ш.": "lat", "с.ш.": "lat",
     "долгота": "lon", "lon": "lon", "longitude": "lon", "lng": "lon",
+    "долгота (e)": "lon", "долгота, в.д.": "lon", "в.д.": "lon",
 }
 
-REQUIRED_FIELDS = {"name", "height", "diameter", "velocity", "temperature", "emission_gs"}
+REQUIRED_FIELDS = ("height", "diameter", "velocity", "temperature", "emission_gs")
+
+NUMERIC_FIELDS = (
+    "height", "diameter", "velocity", "temperature",
+    "emission_gs", "emission_ty",
+)
+COORD_FIELDS = ("lat", "lon")
+# Параметры трубы: в «карточном» шаблоне они объединены (merge) по строкам
+# одного источника, поэтому пустые ячейки протягиваются из строки выше —
+# но только в пределах того же источника.
+INHERITABLE_FIELDS = ("height", "diameter", "velocity", "temperature", "lat", "lon")
 
 
 def _normalize_header(header: str) -> str:
     """Приводит заголовок к каноническому имени."""
-    h = header.strip().lower().replace("°", "°")
+    h = " ".join(str(header).strip().lower().split())
     return COLUMN_MAP.get(h, h)
 
 
-def parse_csv(content: str) -> List[Dict[str, Any]]:
-    """Парсит CSV-текст и возвращает список источников.
+def _to_float(val) -> Optional[float]:
+    """Число из ячейки: поддерживает запятую и неразрывные пробелы."""
+    if val is None or val == "":
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    cleaned = str(val).strip().replace("\xa0", "").replace(" ", "").replace(",", ".")
+    if not cleaned:
+        return None
+    return float(cleaned)
 
-    Поддерживает «протяжку» параметров трубы из строки выше:
-    если у текущей строки заполнены только Код/выбросы, а параметры трубы
-    пусты — они наследуются от предыдущей валидной строки того же источника.
+
+_DMS_SPLIT = re.compile(r"[^\d.]+")
+
+
+def parse_coordinate(val) -> Optional[float]:
     """
-    # Определяем разделитель
+    Координата в десятичных градусах из любой распространённой записи:
+      40.0839 · 40,0839 · 40°05'02" · 40°05'02,5"N · 40 05 02 · 40°05.03' · 40:05:02
+    Южное/западное полушарие (S, W, Ю, З или минус) — отрицательное значение.
+    Бросает ValueError, если разобрать не удалось.
+    """
+    if val is None or val == "":
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    s = str(val).strip().upper().replace("\xa0", " ")
+    if not s:
+        return None
+    negative = s.startswith("-") or any(ch in s for ch in ("S", "W", "Ю", "З"))
+    # Десятичная запятая внутри числа → точка (40,0839 / 02,5")
+    s = re.sub(r"(\d),(\d)", r"\1.\2", s)
+    parts = [p for p in _DMS_SPLIT.split(s) if p]
+    if not parts or len(parts) > 3:
+        raise ValueError(val)
+    nums = [float(p) for p in parts]
+    minutes = nums[1] if len(nums) > 1 else 0.0
+    seconds = nums[2] if len(nums) > 2 else 0.0
+    if minutes >= 60 or seconds >= 60:
+        raise ValueError(val)
+    result = nums[0] + minutes / 60.0 + seconds / 3600.0
+    return -result if negative else result
+
+
+def _cell_text(val) -> Optional[str]:
+    """Текст ячейки; целые числа из Excel без «.0» (301.0 → "301")."""
+    if val is None or val == "":
+        return None
+    if isinstance(val, float) and val.is_integer():
+        return str(int(val))
+    text = str(val).strip()
+    return text or None
+
+
+def _process_rows(headers: List[str], rows: Iterable) -> List[Dict[str, Any]]:
+    """
+    Общая обработка строк CSV/Excel.
+
+    Одна строка = одно вещество одного источника. Источник опознаётся по
+    «№» и/или «Названию»; строка без них относится к источнику выше
+    (объединённые ячейки Excel), и её пустые параметры трубы наследуются.
+    Строка ДРУГОГО источника ничего не наследует — иначе источник без
+    координат молча получил бы координаты соседа.
+    """
+    sources = []
+    last: Dict[str, Any] = {}   # параметры трубы текущего источника
+    last_key = None             # (номер, название) текущего источника
+
+    for row_idx, row in enumerate(rows, start=2):
+        row = list(row) + [None] * (len(headers) - len(row))
+        source: Dict[str, Any] = {}
+        errors = []
+        any_numeric = False
+
+        for i, header in enumerate(headers):
+            val = row[i]
+            if isinstance(val, str):
+                val = val.strip()
+            if header in ("name", "number", "substance_code", "substance_name"):
+                source[header] = _cell_text(val)
+            elif header in NUMERIC_FIELDS:
+                try:
+                    source[header] = _to_float(val)
+                    if source[header] is not None:
+                        any_numeric = True
+                except (ValueError, TypeError):
+                    source[header] = None
+                    errors.append(f"Строка {row_idx}, «{header}»: нечисловое значение «{val}»")
+            elif header in COORD_FIELDS:
+                try:
+                    source[header] = parse_coordinate(val)
+                except (ValueError, TypeError):
+                    source[header] = None
+                    errors.append(
+                        f"Строка {row_idx}: не удалось разобрать координату «{val}» "
+                        f"(пример: 40°05'02\" или 40.0839)"
+                    )
+
+        has_emission = (source.get("emission_gs") is not None
+                        or source.get("emission_ty") is not None)
+        # Пустая/служебная строка (хвост, «Итого», комментарий)
+        if not any_numeric and not has_emission:
+            continue
+
+        own_key = (source.get("number"), source.get("name"))
+        same_source = own_key == (None, None) or own_key == last_key
+        if own_key == (None, None) and last_key:
+            source["number"], source["name"] = last_key
+        if same_source:
+            for f in INHERITABLE_FIELDS:
+                if source.get(f) is None and last.get(f) is not None:
+                    source[f] = last[f]
+        else:
+            last = {}
+        last_key = (source.get("number"), source.get("name"))
+        for f in INHERITABLE_FIELDS:
+            if source.get(f) is not None:
+                last[f] = source[f]
+
+        if not source.get("name"):
+            source["name"] = (f"Источник {source['number']}" if source.get("number")
+                              else f"Источник {row_idx - 1}")
+
+        for field in REQUIRED_FIELDS:
+            if source.get(field) is None:
+                errors.append(f"Строка {row_idx}: отсутствует обязательное поле '{field}'")
+
+        source["_row"] = row_idx
+        source["_errors"] = errors
+        sources.append(source)
+
+    return sources
+
+
+def parse_csv(content: str) -> List[Dict[str, Any]]:
+    """Парсит CSV-текст и возвращает список строк-выбросов."""
     delimiter = ";"
     if content.count(",") > content.count(";"):
         delimiter = ","
-
-    reader = csv.reader(io.StringIO(content), delimiter=delimiter)
-    rows = list(reader)
-
+    rows = list(csv.reader(io.StringIO(content), delimiter=delimiter))
     if len(rows) < 2:
         return []
-
     headers = [_normalize_header(h) for h in rows[0]]
-    sources = []
-
-    NUMERIC_FIELDS = (
-        "height", "diameter", "velocity", "temperature",
-        "emission_gs", "emission_ty", "lat", "lon",
-    )
-    INHERITABLE_FIELDS = ("name", "height", "diameter", "velocity",
-                          "temperature", "lat", "lon")
-
-    last_inheritable: Dict[str, Any] = {}
-
-    for row_idx, row in enumerate(rows[1:], start=2):
-        if len(row) < len(headers):
-            row += [""] * (len(headers) - len(row))
-
-        source = {}
-        errors = []
-        any_numeric_parsed = False
-
-        for i, header in enumerate(headers):
-            val = row[i].strip() if i < len(row) else ""
-
-            if header == "name":
-                source[header] = val or None
-            elif header in ("substance_code", "substance_name"):
-                source[header] = val or None
-            elif header in NUMERIC_FIELDS:
-                if not val:
-                    source[header] = None
-                    continue
-                try:
-                    source[header] = float(val.replace(",", "."))
-                    any_numeric_parsed = True
-                except ValueError:
-                    source[header] = None
-                    errors.append(f"Строка {row_idx}, '{headers[i]}': нечисловое значение '{val}'")
-
-        # Наследуем параметры трубы из строки выше
-        for f in INHERITABLE_FIELDS:
-            if (source.get(f) is None) and last_inheritable.get(f) is not None:
-                source[f] = last_inheritable[f]
-
-        has_emission = (
-            source.get("emission_gs") is not None
-            or source.get("emission_ty") is not None
-        )
-
-        # Если в строке вообще нет числовых данных и нет выбросов —
-        # это пустая/служебная строка (хвост, «Итого», комментарий).
-        if not any_numeric_parsed and not has_emission:
-            continue
-
-        # Обновляем «последние известные» параметры трубы
-        for f in INHERITABLE_FIELDS:
-            if source.get(f) is not None:
-                last_inheritable[f] = source[f]
-
-        if not source.get("name"):
-            source["name"] = last_inheritable.get("name") or f"Источник {row_idx - 1}"
-            last_inheritable["name"] = source["name"]
-
-        # Проверка обязательных полей
-        for field in REQUIRED_FIELDS:
-            if field not in source or source[field] is None:
-                if field == "name":
-                    source["name"] = f"Источник {row_idx - 1}"
-                else:
-                    errors.append(f"Строка {row_idx}: отсутствует обязательное поле '{field}'")
-
-        source["_row"] = row_idx
-        source["_errors"] = errors
-        sources.append(source)
-
-    return sources
+    return _process_rows(headers, rows[1:])
 
 
-def parse_excel(file_bytes: bytes) -> List[Dict[str, Any]]:
-    """Парсит Excel (.xlsx) файл и возвращает список источников.
-
-    Поддерживает «карточный» вид с merge_cells по параметрам трубы:
-    в строках, относящихся к дополнительным веществам того же источника,
-    значения параметров трубы — None (Excel хранит merge так, что значение
-    видно только в top-left ячейке). Такие пропуски наследуются от
-    предыдущей валидной строки того же источника.
+def parse_excel(file_bytes: bytes) -> Dict[str, Any]:
+    """
+    Парсит Excel (.xlsx). Понимает два вида:
+      • «2-бўлим» — таблица «Ифлослантирувчи моддаларни чиқарилмаларининг
+        манбалари» из ПЗВОС (колонки A–T по позициям, шапка в несколько строк);
+      • плоскую таблицу с однострочной шапкой (старый шаблон).
+    Возвращает {"rows": [...], "origin": {"lat", "lon"} | None}.
     """
     import openpyxl
 
-    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True)
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
     ws = wb.active
-
     rows = list(ws.iter_rows(values_only=True))
+    wb.close()
     if len(rows) < 2:
-        return []
+        return {"rows": [], "origin": None}
+
+    section2 = _find_section2_layout(rows)
+    if section2 is not None:
+        return _parse_section2(rows, section2)
 
     headers = [_normalize_header(str(h or "")) for h in rows[0]]
-    sources = []
+    return {"rows": _process_rows(headers, rows[1:]), "origin": None}
 
-    NUMERIC_FIELDS = (
-        "height", "diameter", "velocity", "temperature",
-        "emission_gs", "emission_ty", "lat", "lon",
-    )
-    # Параметры трубы — это поля, которые могут быть объединены merge_cells
-    # по нескольким веществам одного источника. Их «протягиваем» из строки выше.
-    INHERITABLE_FIELDS = ("name", "height", "diameter", "velocity",
-                          "temperature", "lat", "lon")
 
-    last_inheritable: Dict[str, Any] = {}
+# ---------------------------------------------------------------------------
+# Формат «2-бўлим» (ПЗВОС): Ифлослантирувчи моддаларни чиқарилмаларининг манбалари
+# ---------------------------------------------------------------------------
+# Колонки по позициям (как в отчётах): A цех · B источник выделения ·
+# C источник выброса · D часы/год · E № на карте-схеме · F H · G D · H V ·
+# I w0 · J T · K X1 · L Y1 · M X2 · N Y2 · O ширина · P вещество · Q г/с ·
+# R мг/м³ · S т/год · T удельный выброс. Справа — дополнительные колонки
+# шаблона: U код вещества · V широта · W долгота (необязательные).
+S2_COLS = {
+    "shop": 0, "release": 1, "outlet": 2, "hours": 3, "number": 4,
+    "height": 5, "diameter": 6, "volume": 7, "velocity": 8, "temperature": 9,
+    "x1": 10, "y1": 11, "x2": 12, "y2": 13, "width": 14,
+    "substance_name": 15, "emission_gs": 16, "emission_ty": 18,
+    "substance_code": 20, "lat": 21, "lon": 22,
+}
 
-    for row_idx, row in enumerate(rows[1:], start=2):
-        source = {}
+# Узбекские/сокращённые названия веществ из отчётов → коды справочника
+# (коды «Радуги», которые есть во встроенном справочнике).
+SUBSTANCE_ALIASES = {
+    "углерод оксиди": "38", "углерод (ii) оксиди": "38", "ис гази": "38",
+    "азот оксидлари": "34", "азот оксиди": "34", "азот диоксиди": "154",
+    "олтингугурт оксиди": "106", "олтингугурт оксидлари": "106",
+    "олтингугурт диоксиди": "201", "олтингугурт (iv) оксиди": "201",
+    "хлор": "143", "водород хлорид": "120", "хлорли водород": "120",
+    "водород сульфид": "204", "водород сульфиди": "204",
+    "углеводородлар": "118", "чегараланган углеводородлар": "118",
+    "бензин буғлари": "112", "бензин буғи": "112",
+    "қурум": "57", "курум": "57", "сажа": "57",
+    "марганец оксиди": "123", "марганец ва унинг бирикмалари": "123",
+    "темир оксиди": "86", "темир (iii) оксиди": "86",
+    "ноорганик чанг": "114", "анорганик чанг": "114",
+    "цемент чанги": "55", "клинкер чанги": "115к", "оҳак чанги": "902и",
+    "охак чанги": "902и", "оҳактош чанги": "902", "гипс чанги": "777",
+    "ёғоч чанги": "113", "абразив чанг": "102", "абразив чанги": "102",
+    "металл чанги": "101", "кўмир чанги": "128", "комир чанги": "128",
+    "ун чанги": "129", "дон чанги": "100", "пахта чанги": "712",
+    "кул чанги": "125", "руда чанги": "116", "формальдегид": "150",
+    "метан": "205", "аммиак": "04", "метанол": "351", "свинец": "315",
+    "қўрғошин": "315", "фторли водород": "119",
+}
+
+
+def _norm_name(name: str) -> str:
+    return " ".join(str(name).lower().replace("ё", "е").split()) if name else ""
+
+
+_ALIASES_NORM = {_norm_name(k): v for k, v in SUBSTANCE_ALIASES.items()}
+
+
+def _cell_str(v) -> str:
+    return " ".join(str(v).split()).lower() if v is not None else ""
+
+
+def _find_section2_layout(rows) -> Optional[Dict[str, int]]:
+    """
+    Ищет шапку «2-бўлим»: строку с подписями Х1/У1 (кириллица или латиница)
+    и под ней строку-нумерацию колонок 1, 2, 3, ... Возвращает индекс первой
+    строки данных и, если есть, координаты начала карты-схемы.
+    """
+    xy_row = None
+    for i, row in enumerate(rows[:20]):
+        cells = {_cell_str(c) for c in row}
+        if ({"х1", "x1"} & cells) and ({"у1", "y1"} & cells):
+            xy_row = i
+            break
+    if xy_row is None:
+        return None
+    data_start = xy_row + 1
+    # Строка нумерации колонок «1 2 3 … 20» — данные начинаются после неё
+    for i in range(xy_row + 1, min(xy_row + 4, len(rows))):
+        row = rows[i]
+        if len(row) > 2 and _cell_str(row[0]) == "1" and _cell_str(row[1]) == "2":
+            data_start = i + 1
+            break
+    return {"data_start": data_start}
+
+
+def _find_origin(rows) -> Optional[Dict[str, float]]:
+    """
+    Начало координат карты-схемы (X=0, Y=0) — строка шаблона, где после
+    подписи «Начало координат» стоят широта и долгота (десятичные или Г-М-С).
+    """
+    for row in rows[:20]:
+        for j, c in enumerate(row):
+            if "начало координат" in _cell_str(c) or "координаталар боши" in _cell_str(c):
+                vals = []
+                for v in row[j + 1:]:
+                    if v is None or str(v).strip() == "":
+                        continue
+                    try:
+                        vals.append(parse_coordinate(v))
+                    except (ValueError, TypeError):
+                        continue
+                    if len(vals) == 2:
+                        break
+                if len(vals) == 2 and vals[0] is not None and vals[1] is not None:
+                    return {"lat": vals[0], "lon": vals[1]}
+    return None
+
+
+def _num_or_none(v) -> Optional[float]:
+    """Число из ячейки; прочерк «-» и пустота → None."""
+    if v is None:
+        return None
+    if isinstance(v, str) and v.strip() in ("", "-", "—", "–"):
+        return None
+    return _to_float(v)
+
+
+def _parse_section2(rows, layout) -> Dict[str, Any]:
+    origin = _find_origin(rows)
+    out = []
+    cur: Dict[str, Any] = {}   # параметры текущего источника
+
+    def cell(row, key):
+        i = S2_COLS[key]
+        return row[i] if i < len(row) else None
+
+    for row_idx, row in enumerate(rows[layout["data_start"]:], start=layout["data_start"] + 1):
+        row = list(row)
+        first = _cell_str(cell(row, "shop"))
+        if first.startswith("жами") or first.startswith("итого") or first.startswith("всего"):
+            continue
+        sub_name = cell(row, "substance_name")
+        sub_name = str(sub_name).strip() if sub_name is not None else ""
         errors = []
-        any_numeric_parsed = False
 
-        for i, header in enumerate(headers):
-            val = row[i] if i < len(row) else None
+        def num(key):
+            try:
+                return _num_or_none(cell(row, key))
+            except (ValueError, TypeError):
+                errors.append(f"Строка {row_idx}: нечисловое значение «{cell(row, key)}»")
+                return None
 
-            if header == "name":
-                source[header] = str(val).strip() if val else None
-            elif header in ("substance_code", "substance_name"):
-                # Excel часто хранит код вещества числом: "0301" → 301 или 301.0.
-                # Возвращаем строку без ".0"; ведущие нули восстановить нельзя —
-                # их учитывает сопоставление на фронтенде.
-                if val is None or val == "":
-                    source[header] = None
-                elif isinstance(val, float) and val.is_integer():
-                    source[header] = str(int(val))
-                else:
-                    source[header] = str(val).strip()
-            elif header in NUMERIC_FIELDS:
-                if val is None or val == "":
-                    source[header] = None
-                    continue
-                try:
-                    # Excel в русской локали иногда хранит числа как строки
-                    # с запятой "0,000000205". Заменяем запятую на точку и
-                    # удаляем неразрывные пробелы (тысячный разделитель).
-                    if isinstance(val, str):
-                        cleaned = val.strip().replace("\xa0", "").replace(" ", "")
-                        cleaned = cleaned.replace(",", ".")
-                        source[header] = float(cleaned) if cleaned else None
-                        if source[header] is not None:
-                            any_numeric_parsed = True
-                    else:
-                        source[header] = float(val)
-                        any_numeric_parsed = True
-                except (ValueError, TypeError):
-                    source[header] = None
-                    errors.append(f"Строка {row_idx}, '{headers[i]}': нечисловое значение «{val}»")
-
-        # Наследуем параметры трубы из строки выше, если пусто
-        for f in INHERITABLE_FIELDS:
-            if (source.get(f) is None) and last_inheritable.get(f) is not None:
-                source[f] = last_inheritable[f]
-
-        # Признак «строка содержит данные о выбросе» — хотя бы один из г/с / т/год
-        has_emission = (
-            source.get("emission_gs") is not None
-            or source.get("emission_ty") is not None
-        )
-
-        # Пустая или служебная строка — тихо пропускаем.
-        # Считаем строку служебной, если:
-        #   - вообще нет числовых данных,
-        #   - И нет выбросов, унаследованных параметров недостаточно для источника.
-        if not any_numeric_parsed and not has_emission:
+        gs, ty = num("emission_gs"), num("emission_ty")
+        number = _cell_text(cell(row, "number"))
+        if number:
+            # Новый источник: собираем параметры трубы
+            name = (_cell_text(cell(row, "release")) or _cell_text(cell(row, "outlet"))
+                    or f"Источник {number}")
+            try:
+                lat = parse_coordinate(cell(row, "lat"))
+                lon = parse_coordinate(cell(row, "lon"))
+            except (ValueError, TypeError):
+                lat = lon = None
+                errors.append(f"Строка {row_idx}: не удалось разобрать широту/долготу")
+            cur = {
+                "number": number, "name": name,
+                "height": num("height"), "diameter": num("diameter"),
+                "velocity": num("velocity"), "temperature": num("temperature"),
+                "volume": num("volume"),
+                "x1": num("x1"), "y1": num("y1"), "x2": num("x2"), "y2": num("y2"),
+                "width": num("width"), "lat": lat, "lon": lon,
+            }
+        if not cur or (not sub_name and gs is None and ty is None):
             continue
 
-        # Обновляем «последние известные» параметры трубы для следующих строк
-        for f in INHERITABLE_FIELDS:
-            if source.get(f) is not None:
-                last_inheritable[f] = source[f]
+        src = dict(cur)
+        # Скорость не указана, но есть объём V — w0 = 4V / (π·D²)
+        if not src.get("velocity") and src.get("volume") and src.get("diameter"):
+            src["velocity"] = 4.0 * src["volume"] / (3.141592653589793 * src["diameter"] ** 2)
+        code = _cell_text(cell(row, "substance_code"))
+        if not code and sub_name:
+            code = _ALIASES_NORM.get(_norm_name(sub_name))
+        src.update({
+            "substance_code": code, "substance_name": sub_name or None,
+            "emission_gs": gs, "emission_ty": ty,
+        })
+        _apply_geometry(src, origin)
+        for field in ("height", "diameter", "velocity", "temperature"):
+            if src.get(field) is None:
+                errors.append(f"Строка {row_idx}: не заполнено поле «{field}» у источника {src['number']}")
+        if gs is None and ty is None:
+            errors.append(f"Строка {row_idx}: нет выброса (г/с или т/год)")
+        src["_row"] = row_idx
+        src["_errors"] = errors
+        out.append(src)
 
-        # Имя по умолчанию
-        if not source.get("name"):
-            source["name"] = last_inheritable.get("name") or f"Источник {row_idx - 1}"
-            last_inheritable["name"] = source["name"]
-
-        for field in REQUIRED_FIELDS:
-            if field not in source or source[field] is None:
-                if field == "name":
-                    source["name"] = f"Источник {row_idx - 1}"
-                else:
-                    errors.append(f"Строка {row_idx}: отсутствует обязательное поле '{field}'")
-
-        source["_row"] = row_idx
-        source["_errors"] = errors
-        sources.append(source)
-
-    wb.close()
-    return sources
+    return {"rows": out, "origin": origin}
 
 
-def generate_template_csv() -> str:
-    """Генерирует CSV-шаблон для импорта (с BOM для Excel).
-
-    Каждая строка — одно вещество от одного источника.
-    Если у одной трубы несколько веществ — повторите строку с тем же
-    "Названием" и параметрами трубы, поменяв только колонки вещества и выбросов.
+def _apply_geometry(src: Dict[str, Any], origin: Optional[Dict[str, float]]) -> None:
     """
-    header = "Название;Код вещества;Высота (H), м;Диаметр (D), м;Скорость (w0), м/с;Температура (Tг), °C;Выброс (M), г/с;Выброс, т/год;Широта;Долгота"
-    examples = "\n".join([
-        "Труба ТЭЦ-1;0301;45;1.2;12.0;180;8.5;268.06;41.2995;69.2401",
-        "Труба ТЭЦ-1;0337;45;1.2;12.0;180;12.0;378.43;41.2995;69.2401",
-        "Труба ТЭЦ-1;0330;45;1.2;12.0;180;3.5;110.4;41.2995;69.2401",
-    ])
-    return f"{header}\n{examples}\n"
+    Координаты карты-схемы → положение источника.
+    Точечный: (X1, Y1). Площадной/линейный (заданы X2, Y2): центр — середина
+    отрезка X1Y1–X2Y2, длина — его длина, ширина — колонка «Кенглик», угол —
+    направление отрезка от оси X (на восток) против часовой стрелки, как
+    у площадного источника в программе.
+    Если задана широта/долгота источника — она главнее X/Y. Если X/Y есть,
+    а начала координат нет — отдаём метры (x_m, y_m), фронт поставит их
+    от центра города.
+    """
+    import math
+    x1, y1, x2, y2 = src.pop("x1"), src.pop("y1"), src.pop("x2"), src.pop("y2")
+    width = src.pop("width")
+    src.pop("volume", None)
+    if x1 is None or y1 is None:
+        return
+    cx, cy = x1, y1
+    if x2 is not None and y2 is not None and (x2, y2) != (x1, y1):
+        cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+        src["type"] = "area"
+        src["area_length"] = round(math.hypot(x2 - x1, y2 - y1), 2)
+        src["area_width"] = width if width and width > 0 else 1.0
+        src["area_angle"] = round(math.degrees(math.atan2(y2 - y1, x2 - x1)), 2)
+    src["x_m"], src["y_m"] = cx, cy
+    if src.get("lat") is None and origin:
+        src["lat"] = origin["lat"] + cy / 111_000.0
+        src["lon"] = origin["lon"] + cx / (111_000.0 * math.cos(math.radians(origin["lat"])))
 
 
 def generate_template_xlsx() -> bytes:
-    """Генерирует Excel-шаблон для импорта.
-
-    Плоская таблица: одна строка = одно вещество от одного источника.
-    Параметры трубы (Название, H, D, w₀, Tг, Lat, Lon) визуально
-    объединены (merge) по нескольким строкам одного источника —
-    в каждой подстроке кода/выбросов параметры трубы повторяются
-    зрительно как «карточка».
+    """
+    Шаблон импорта в виде таблицы «2-бўлим» ПЗВОС: те же колонки A–T,
+    что в отчёте (можно вставлять готовую таблицу), плюс справа код
+    вещества и широта/долгота источника. Над шапкой — строка «Начало
+    координат», чтобы X/Y карты-схемы ставились на карту по местам.
     """
     import openpyxl
     from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = "Источники"
+    ws.title = "2-бўлим"
 
-    headers = [
-        "Название", "Код вещества", "Высота (H), м", "Диаметр (D), м",
-        "Скорость (w0), м/с", "Температура (Tг), °C",
-        "Выброс (M), г/с", "Выброс, т/год", "Широта", "Долгота",
+    thin = Side(style="thin", color="94A3B8")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    head_font = Font(bold=True, size=9)
+    head_fill = PatternFill(start_color="DBEAFE", end_color="DBEAFE", fill_type="solid")
+    extra_fill = PatternFill(start_color="FEF9C3", end_color="FEF9C3", fill_type="solid")
+
+    ws["A1"] = "2-Бўлим"
+    ws["A1"].font = Font(bold=True, size=12)
+    ws["A2"] = "Ифлослантирувчи моддаларни чиқарилмаларининг манбалари"
+    ws["A2"].font = Font(bold=True, size=11)
+
+    # Строка начала координат карты-схемы (X=0, Y=0)
+    ws["A3"] = "Начало координат карты-схемы (X=0, Y=0):"
+    ws["A3"].font = Font(bold=True, size=10, color="B91C1C")
+    ws["E3"] = "широта"
+    ws["F3"] = "40°05'02\""
+    ws["G3"] = "долгота"
+    ws["H3"] = "65°22'45\""
+    for ref in ("F3", "H3"):
+        ws[ref].fill = extra_fill
+        ws[ref].border = border
+        ws[ref].font = Font(bold=True, size=10)
+    ws.merge_cells("A3:D3")
+
+    # Шапка (строки 5–7) и нумерация колонок (строка 8)
+    top = {
+        "A": "Ишлаб чиқариш цехи ва бўлинмасининг номи",
+        "B": "Ажралма манбасининг номи",
+        "C": "Чиқарилма манбасининг номи",
+        "D": "Чиқарилма манбасининг ишлаш вақти соат/йил",
+        "E": "Харитадаги манбаларнинг рақамланиши",
+        "F": "Чиқарилма манбаларининг баландлиги, м.",
+        "G": "Қувур диаметри, м.",
+        "H": "Газ-ҳаво аралашмасининг кўрсаткичлари",
+        "K": "Харита-схемасидаги чиқарилма манбасининг координаталари, м.",
+        "P": "Ифлослантирувчи моддаларнинг номи",
+        "Q": "Ифлослантирувчи моддаларнинг чиқарилмалари",
+        "T": "Бирлик маҳсулотга тўғри келадиган солиштирма чиқарилма",
+        "U": "Код вещества (необяз.)",
+        "V": "Широта источника (необяз.)",
+        "W": "Долгота источника (необяз.)",
+    }
+    for col, text in top.items():
+        ws[f"{col}5"] = text
+    mid = {"H": "Ҳажми, м3/с", "I": "Тезлик, м/с", "J": "Температура, °С",
+           "K": "Нуқтали, чизиқлининг бир томони", "M": "Иккинчи томон охирги нуқтаси",
+           "O": "Кенглик, м"}
+    for col, text in mid.items():
+        ws[f"{col}6"] = text
+    low = {"K": "Х1", "L": "У1", "M": "Х2", "N": "У2", "Q": "г/с", "R": "мг/м3", "S": "т/г"}
+    for col, text in low.items():
+        ws[f"{col}7"] = text
+    for merge in ("A5:A7", "B5:B7", "C5:C7", "D5:D7", "E5:E7", "F5:F7", "G5:G7",
+                  "H5:J5", "H6:H7", "I6:I7", "J6:J7", "K5:O5", "K6:L6", "M6:N6",
+                  "O6:O7", "P5:P7", "Q5:S6", "T5:T7", "U5:U7", "V5:V7", "W5:W7"):
+        ws.merge_cells(merge)
+    n_cols = 23
+    for c in range(1, n_cols + 1):
+        ws.cell(row=8, column=c, value=c if c <= 20 else None)
+        for r in range(5, 9):
+            cell = ws.cell(row=r, column=c)
+            cell.font = head_font
+            cell.alignment = center
+            cell.border = border
+            cell.fill = extra_fill if c > 20 else head_fill
+
+    # Пример: труба с тремя веществами, неорганизованный источник с площадкой
+    demo = [
+        ["Ишлаб чиқариш цехи", "Қозонхона", "Ташкиллаштирилган", 2496, "0001", 12, 0.5,
+         None, 5.2, 120, 150, 210, "-", "-", "-", "Углерод оксиди", 0.0236, None, 0.2119, "-",
+         None, None, None],
+        [None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+         None, "Азот оксидлари", 0.0104, None, 0.0933, "-", None, None, None],
+        [None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+         None, "Олтингугурт оксиди", 0.0015, None, 0.0132, "-", None, None, None],
+        [None, "Омбор", "Ташкиллаштирилмаган", 1872, "6001", 2, 0.5, None, 0.5, 28.5,
+         300, 100, 360, 100, 20, "Ноорганик чанг", 0.044, None, 0.29, "-", "114", None, None],
     ]
-    # Индексы колонок, которые относятся к «параметрам трубы» (1-based).
-    # Их объединяем merge_cells по всем строкам одного источника.
-    SRC_PARAM_COLS = (1, 3, 4, 5, 6, 9, 10)
-    # Колонки «по веществу» (свои значения в каждой строке)
-    SUBSTANCE_COLS = (2, 7, 8)
+    for i, values in enumerate(demo):
+        r = 9 + i
+        for c, v in enumerate(values, 1):
+            cell = ws.cell(row=r, column=c, value=v)
+            cell.border = border
+            cell.alignment = center
+            cell.font = Font(size=10)
+            if c > 20:
+                cell.fill = extra_fill
+    end = 9 + len(demo)
+    ws.cell(row=end, column=1, value="Жами:").font = Font(bold=True, size=10)
 
-    header_font = Font(bold=True, size=11, color="FFFFFF")
-    header_fill = PatternFill(start_color="2563EB", end_color="2563EB", fill_type="solid")
-    src_param_fill = PatternFill(start_color="EFF6FF", end_color="EFF6FF", fill_type="solid")
-    thin = Side(style="thin", color="CBD5E1")
-    thin_border = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-    centered = Alignment(horizontal="center", vertical="center", wrap_text=True)
-
-    for col, h in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=col, value=h)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = centered
-        cell.border = thin_border
-    ws.row_dimensions[1].height = 36
-
-    # Демо-данные: 3 источника с разным числом веществ
-    sources_demo = [
-        {
-            "name": "Труба ТЭЦ-1",
-            "height": 45, "diameter": 1.2, "velocity": 12.0,
-            "temperature": 180, "lat": 41.2995, "lon": 69.2401,
-            "emissions": [
-                ("0301", 8.5, 268.06),
-                ("0337", 12.0, 378.43),
-                ("0330", 3.5, 110.40),
-            ],
-        },
-        {
-            "name": "Труба котельной №2",
-            "height": 25, "diameter": 0.8, "velocity": 8.5,
-            "temperature": 140, "lat": 41.3010, "lon": 69.2480,
-            "emissions": [
-                ("0301", 2.1, 66.20),
-                ("2902", 0.8, 25.20),
-            ],
-        },
-        {
-            "name": "Вентшахта",
-            "height": 8, "diameter": 0.56, "velocity": 2.4,
-            "temperature": 28.5, "lat": 41.3045, "lon": 69.2510,
-            "emissions": [
-                ("0123", 0.053, 0.06869),
-                ("0143", 0.000018, 0.0000024),
-            ],
-        },
-    ]
-
-    row = 2
-    for src in sources_demo:
-        n = len(src["emissions"])
-        first_row = row
-        last_row = row + n - 1
-
-        # Записываем параметры трубы в первую строку «карточки»
-        src_param_values = {
-            1: src["name"],
-            3: src["height"],
-            4: src["diameter"],
-            5: src["velocity"],
-            6: src["temperature"],
-            9: src["lat"],
-            10: src["lon"],
-        }
-        for col, val in src_param_values.items():
-            cell = ws.cell(row=first_row, column=col, value=val)
-            cell.font = Font(size=10, color="1E293B")
-            cell.alignment = centered
-            cell.fill = src_param_fill
-            cell.border = thin_border
-        # Объединяем колонки параметров трубы по всем строкам источника
-        if n > 1:
-            for col in SRC_PARAM_COLS:
-                ws.merge_cells(start_row=first_row, start_column=col,
-                                end_row=last_row, end_column=col)
-                # Прокрашиваем объединённую область (для merge цвет нужен у top-left)
-                for r in range(first_row, last_row + 1):
-                    ws.cell(row=r, column=col).fill = src_param_fill
-                    ws.cell(row=r, column=col).border = thin_border
-
-        # Строки веществ
-        for i, (code, gs, ty) in enumerate(src["emissions"]):
-            r = first_row + i
-            for col, val in ((2, code), (7, gs), (8, ty)):
-                cell = ws.cell(row=r, column=col, value=val)
-                cell.font = Font(size=10, color="1E293B")
-                cell.alignment = centered
-                cell.border = thin_border
-            ws.row_dimensions[r].height = 20
-
-        row = last_row + 1
-
-    # Подсказка снизу
-    note = ws.cell(row=row + 1, column=1, value=(
-        "Каждое вещество — отдельная строка. У одного источника параметры "
-        "трубы (Название, H, D, w0, Tг, Широта, Долгота) визуально объединены: "
-        "при добавлении строк просто повторяйте «Название» или оставляйте "
-        "объединение — парсер унаследует параметры из строки выше."
+    note = ws.cell(row=end + 2, column=1, value=(
+        "Как заполнять: одна строка — одно вещество. Новый источник начинается со строки, "
+        "где заполнен № (колонка 5); строки ниже без № — другие вещества того же источника. "
+        "Координаты X1/У1 — метры от начала карты-схемы (строка 3 вверху, широта/долгота "
+        "в градусах-минутах-секундах или десятичные). Для площадного/линейного источника "
+        "заполните Х2/У2 (другой конец) и ширину. Вместо X/Y можно указать широту и долготу "
+        "самого источника (колонки V, W). Код вещества (колонка U) нужен, если название "
+        "не находится в справочнике."
     ))
-    note.font = Font(italic=True, size=10, color="64748B")
-    note.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
-    ws.merge_cells(start_row=row + 1, start_column=1, end_row=row + 1, end_column=len(headers))
-    ws.row_dimensions[row + 1].height = 36
+    note.font = Font(italic=True, size=9, color="475569")
+    note.alignment = Alignment(wrap_text=True, vertical="top")
+    ws.merge_cells(start_row=end + 2, start_column=1, end_row=end + 2, end_column=n_cols)
+    ws.row_dimensions[end + 2].height = 54
 
-    # Ширины колонок
-    col_widths = [22, 14, 14, 14, 16, 18, 16, 16, 12, 12]
-    for col, w in enumerate(col_widths, 1):
-        ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = w
-
-    ws.freeze_panes = "A2"
+    widths = [18, 18, 16, 10, 9, 9, 8, 8, 8, 10, 8, 8, 8, 8, 8, 22, 10, 8, 10, 10, 10, 12, 12]
+    for c, w in enumerate(widths, 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(c)].width = w
+    ws.row_dimensions[5].height = 60
+    ws.row_dimensions[6].height = 36
+    ws.freeze_panes = "A9"
 
     buf = io.BytesIO()
     wb.save(buf)

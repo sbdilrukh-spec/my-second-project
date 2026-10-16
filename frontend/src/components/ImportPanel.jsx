@@ -20,20 +20,25 @@ export default function ImportPanel({ onImport, t }) {
       const res = await axios.post("/api/import", formData);
       const data = res.data;
 
+      // onImport возвращает предупреждения (вещество не найдено в справочнике,
+      // нет начала координат карты-схемы и т.п.) — показываем их под итогом.
+      let warnings = [];
       if (data.sources && data.sources.length > 0) {
-        onImport(data.sources);
+        warnings = onImport(data.sources, { origin: data.origin, needsOrigin: data.needs_origin }) || [];
       }
 
       setImportResult({
         total: data.total,
         valid: data.valid_count,
         errors: data.errors || [],
+        warnings,
       });
     } catch (err) {
       setImportResult({
         total: 0,
         valid: 0,
         errors: [err?.response?.data?.detail || "Ошибка импорта"],
+        warnings: [],
       });
     } finally {
       setImporting(false);
@@ -99,6 +104,13 @@ export default function ImportPanel({ onImport, t }) {
               {importResult.errors.length > 5 && (
                 <div>...и ещё {importResult.errors.length - 5} ошибок</div>
               )}
+            </div>
+          )}
+          {importResult.warnings?.length > 0 && (
+            <div style={{ color: "#B45309", marginTop: 4, fontSize: 11 }}>
+              {importResult.warnings.map((w, i) => (
+                <div key={i}>⚠ {w}</div>
+              ))}
             </div>
           )}
         </div>

@@ -1,4 +1,5 @@
 import React, { useCallback, useRef, useState } from "react";
+import { sourceNumber } from "../sourceNumber.js";
 
 // Порция строк таблицы: при сотнях источников рендерить всю таблицу сразу
 // нельзя — тысячи инпутов замораживают интерфейс.
@@ -99,7 +100,16 @@ export default function TableInput({ sources, onChange, onAdd, onRemove, t }) {
           <tbody>
             {sources.slice(0, visibleRows).map((src, i) => (
               <tr key={i}>
-                <td style={tdStyle}>{i + 1}</td>
+                <td style={tdStyle}>
+                  <input
+                    type="text"
+                    value={src.number ?? ""}
+                    placeholder={sourceNumber(src, i)}
+                    onChange={(e) => onChange(i, "number", e.target.value)}
+                    style={{ ...inputStyle, width: 48, fontWeight: 600 }}
+                    title="№ источника"
+                  />
+                </td>
                 {COLUMNS.map((col) => {
                   // Поля выбросов теперь живут в src.emissions[0]; остальное — на верхнем уровне
                   const isEmissionKey = col.key === "emission_gs" || col.key === "emission_ty";
