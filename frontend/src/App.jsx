@@ -175,7 +175,7 @@ export default function App() {
       .catch(() => {
         setCities([
           { name: "Ташкент", lat: 41.2995, lon: 69.2401, A: 200, T_avg: 13.1 },
-          { name: "Навои", lat: 40.0839, lon: 65.3792, A: 220, T_avg: 14.0 },
+          { name: "Навои", lat: 40.0839, lon: 65.3792, A: 200, T_avg: 14.0 },
           { name: "Самарканд", lat: 39.649, lon: 66.975, A: 200, T_avg: 12.7 },
         ]);
       });

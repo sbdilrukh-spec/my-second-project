@@ -78,7 +78,7 @@ def calc_source_params(
     eta: float = 1.0,  # коэффициент рельефа
 ) -> dict:
     """Cm (мг/м³), Xm (м), Um (м/с) и промежуточные величины по ОНД-86."""
-    H = max(float(H or 0.0), 0.5)
+    H = max(float(H or 0.0), 2.0)   # п. 2.1: для наземных источников H = 2 м
     D = max(float(D or 0.0), 0.0)
     w0 = max(float(w0 or 0.0), 0.0)
     F = float(F or F_GAS)
