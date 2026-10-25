@@ -15,7 +15,7 @@ const EMISSION_DEFAULT = {
   substance: null,
   emission_gs: 5.0,
   emission_ty: null,
-  pdk: 0.5,
+  pdk: null,   // ПДК — в базе веществ проекта
 };
 
 export function createDefaultSource(cityLat, cityLon, idx) {
@@ -71,6 +71,7 @@ function SourceForm({
   onRemove,
   onPickFromMap,
   substances,
+  projectSubstanceMap,
   onAddCustomSubstance,
   defaultCollapsed = false,
   t,
@@ -103,19 +104,26 @@ function SourceForm({
     </div>
   );
 
+  // Выброс хранит только ссылку на вещество (код); ПДК, класс и F живут в базе
+  // веществ проекта. Незнакомый код App добавит в базу сам (collectMissing).
   const handleEmissionSubstanceSelect = (emIdx, code) => {
+    code = String(code ?? "").trim();
     if (code === "") {
       onEmissionChange(index, emIdx, "substance", null);
       return;
     }
-    const found = substances.find((s) => s.code === code);
-    if (found) {
-      onEmissionChange(index, emIdx, "substance", found);
-      if (found.pdk_mr != null) {
-        onEmissionChange(index, emIdx, "pdk", found.pdk_mr);
-      }
-    }
+    const found = projectSubstanceMap?.get(code)
+      || substances.find((s) => String(s.code) === code)
+      || { code, name: code };
+    onEmissionChange(index, emIdx, "substance", { code: String(found.code), name: found.name });
+    // Свой ПДК у выброса больше не задаётся — иначе новый код попал бы в базу
+    // с дефолтными 0,5 вместо значения из справочника.
+    onEmissionChange(index, emIdx, "pdk", null);
   };
+
+  const projectOnly = projectSubstanceMap
+    ? [...projectSubstanceMap.values()].filter((p) => !substances.some((s) => String(s.code) === String(p.code)))
+    : [];
 
   const handleSaveCustom = (emIdx) => {
     if (!newSubstance.name || !newSubstance.pdk_mr) return;
@@ -129,7 +137,7 @@ function SourceForm({
     };
     if (onAddCustomSubstance) onAddCustomSubstance(substance);
     onEmissionChange(index, emIdx, "substance", substance);
-    if (substance.pdk_mr != null) onEmissionChange(index, emIdx, "pdk", substance.pdk_mr);
+    onEmissionChange(index, emIdx, "pdk", null);
     setNewSubstance({ name: "", code: "", pdk_mr: "", pdk_ss: "", hazard_class: "" });
     setShowAddForm(null);
   };
@@ -317,32 +325,54 @@ function SourceForm({
 
             <div className="field-row">
               <label>{t.substance}</label>
-              <select
-                value={em.substance?.code || ""}
-                onChange={(e) => handleEmissionSubstanceSelect(emIdx, e.target.value)}
-                style={{ fontSize: 11 }}
-              >
-                <option value="">— {t.selectSubstance} —</option>
-                {/* Вещество из загруженного проекта, которого нет в справочнике:
-                    без этой опции селект показывал бы пустое значение */}
-                {em.substance?.code && !substances.some((s) => String(s.code) === String(em.substance.code)) && (
-                  <option value={em.substance.code}>
-                    {em.substance.code} — {em.substance.name} (ПДК: {em.substance.pdk_mr ?? "—"})
-                  </option>
-                )}
-                {substances.map((s) => (
-                  <option key={s.code} value={s.code}>
-                    {s.code} — {s.name} (ПДК: {s.pdk_mr ?? "—"})
-                  </option>
-                ))}
-              </select>
+              <div style={{ display: "flex", gap: 4 }}>
+                {/* Код можно просто вписать: Enter или уход из поля */}
+                <input
+                  key={em.substance?.code || ""}
+                  type="text"
+                  defaultValue={em.substance?.code || ""}
+                  placeholder={t.substanceCode}
+                  title={t.substanceCodeHint}
+                  style={{ width: 58, flexShrink: 0, fontSize: 11 }}
+                  onBlur={(e) => {
+                    if (e.target.value.trim() !== String(em.substance?.code || "")) {
+                      handleEmissionSubstanceSelect(emIdx, e.target.value);
+                    }
+                  }}
+                  onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+                />
+                <select
+                  value={em.substance?.code || ""}
+                  onChange={(e) => handleEmissionSubstanceSelect(emIdx, e.target.value)}
+                  style={{ fontSize: 11, minWidth: 0, flex: 1 }}
+                >
+                  <option value="">— {t.selectSubstance} —</option>
+                  {/* Вещества базы проекта, которых нет в справочнике (свои,
+                      из файла) — без них селект показывал бы пустое значение */}
+                  {projectOnly.map((s) => (
+                    <option key={`p${s.code}`} value={s.code}>{s.code} — {s.name}</option>
+                  ))}
+                  {em.substance?.code && !projectSubstanceMap?.has(String(em.substance.code)) &&
+                    !substances.some((s) => String(s.code) === String(em.substance.code)) && (
+                    <option value={em.substance.code}>{em.substance.code} — {em.substance.name}</option>
+                  )}
+                  {substances.map((s) => (
+                    <option key={s.code} value={s.code}>{s.code} — {s.name}</option>
+                  ))}
+                </select>
+              </div>
             </div>
 
-            {em.substance && (
-              <div style={{ fontSize: 10, color: "#64748b", padding: "1px 0 0 4px" }}>
-                {t.hazardClass}: {em.substance.hazard_class ?? "—"} | {t.pdkSs}: {em.substance.pdk_ss ?? "—"}
-              </div>
-            )}
+            {em.substance && (() => {
+              const db = projectSubstanceMap?.get(String(em.substance.code));
+              const noPdk = db && !(Number(db.pdk_mr) > 0);
+              return (
+                <div style={{ fontSize: 10, color: noPdk ? "#B91C1C" : "#64748b", padding: "1px 0 0 4px" }}>
+                  {t.pdkMr}: {db?.pdk_mr ?? "—"} | {t.pdkSs}: {db?.pdk_ss ?? "—"} | {t.hazardClass}: {db?.hazard_class ?? "—"}
+                  {" "}<span style={{ color: "#94A3B8" }}>({t.fromProjectDb})</span>
+                </div>
+              );
+            })()}
 
             <div className="field-row">
               <label>{t.emissionGs}</label>
@@ -364,14 +394,6 @@ function SourceForm({
                   const v = parseFloat(e.target.value);
                   onEmissionChange(index, emIdx, "emission_ty", isNaN(v) ? null : v);
                 }}
-              />
-            </div>
-            <div className="field-row">
-              <label>{t.pdkMr}</label>
-              <input
-                type="number" step="0.001" min="0"
-                value={em.pdk ?? 0.5}
-                onChange={(e) => onEmissionChange(index, emIdx, "pdk", parseFloat(e.target.value) || 0.5)}
               />
             </div>
 

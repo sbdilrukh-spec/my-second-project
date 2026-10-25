@@ -3,6 +3,7 @@ import { fetchCities, fetchSubstances, fetchWeather, calculate, fetchTables, exp
 import { translations } from "./i18n.js";
 import SourceForm, { createDefaultSource, migrateSource } from "./components/SourceForm.jsx";
 import { sourceNumber } from "./sourceNumber.js";
+import { collectMissing, resolveSources, missingPdkCodes, entryForCode } from "./projectSubstances.js";
 import MeteoPanel from "./components/MeteoPanel.jsx";
 
 import EnterpriseCard, { DEFAULT_ENTERPRISE } from "./components/EnterpriseCard.jsx";
@@ -13,6 +14,7 @@ import MapView from "./components/MapView.jsx";
 import ResultsPanel from "./components/ResultsPanel.jsx";
 import TableInput from "./components/TableInput.jsx";
 import SubstanceEditor from "./components/SubstanceEditor.jsx";
+import ProjectSubstances from "./components/ProjectSubstances.jsx";
 import EnterpriseBoundaryEditor from "./components/EnterpriseBoundaryEditor.jsx";
 import AddSourceModal from "./components/AddSourceModal.jsx";
 
@@ -41,6 +43,12 @@ function toBackendSources(sources) {
     ...src,
     source_type: src.type === "area" ? "area" : "stack",
   }));
+}
+
+// Минимальный ПДК среди всех выбросов (поле pdk верхнего уровня старого API).
+function minPdk(sources) {
+  const all = sources.flatMap((s) => (s.emissions || []).map((e) => e.pdk ?? 0.5));
+  return all.length ? Math.min(...all) : 0.5;
 }
 
 // Контуры предприятия: до 5 отдельных объектов. Старые проекты хранят один
@@ -125,6 +133,9 @@ export default function App() {
       : [createDefaultSource(41.2995, 69.2401, 0)]
   );
   const [enterprise, setEnterprise] = useState(migrateEnterprise(savedProject?.enterprise || DEFAULT_ENTERPRISE));
+  // База веществ проекта (projectSubstances.js): единственное место, где
+  // задаются ПДК/класс/F; в выбросы подставляется через resolveSources.
+  const [projectSubstances, setProjectSubstances] = useState(savedProject?.projectSubstances || []);
 
   const [result, setResult] = useState(null);
   const [displaySubstanceCode, setDisplaySubstanceCode] = useState(null); // выбранное для отображения вещество (если расчёт многовеществный)
@@ -153,7 +164,7 @@ export default function App() {
 
   // --- Автосохранение каждые 30 секунд ---
   const autosaveRef = useRef();
-  autosaveRef.current = { sources, meteo, grid, selectedSubstance, enterprise };
+  autosaveRef.current = { sources, meteo, grid, selectedSubstance, enterprise, projectSubstances };
 
   useEffect(() => {
     const save = () => {
@@ -225,6 +236,23 @@ export default function App() {
     }
   }, [sources, substances, allSubstances]);
 
+  // Каждое вещество из выбросов должно быть в базе проекта: новые коды
+  // (выбор в карточке, импорт, старый файл проекта) добавляются сами.
+  useEffect(() => {
+    const added = collectMissing(sources, projectSubstances, allSubstances);
+    if (added.length > 0) setProjectSubstances((prev) => [...prev, ...added]);
+  }, [sources, projectSubstances, allSubstances]);
+
+  const projectSubstanceMap = useMemo(
+    () => new Map(projectSubstances.map((s) => [String(s.code), s])),
+    [projectSubstances]
+  );
+  // Источники с ПДК/классом/F из базы — только их отправляем на бэкенд и в файл.
+  const resolvedSources = useMemo(
+    () => resolveSources(sources, projectSubstanceMap),
+    [sources, projectSubstanceMap]
+  );
+
   // Карточки после фильтра поиска. Сохраняем исходный индекс i — все
   // обработчики (onChange, onRemove, ...) работают по индексу в sources.
   const filteredSources = useMemo(() => {
@@ -239,6 +267,7 @@ export default function App() {
 
   // Substance editor modal
   const [showSubstanceEditor, setShowSubstanceEditor] = useState(false);
+  const [showProjectSubstances, setShowProjectSubstances] = useState(false);
   // Enterprise boundary editor modal
   const [showBoundaryEditor, setShowBoundaryEditor] = useState(false);
   // Триггер-счётчик: при изменении карта приближается к контуру предприятия
@@ -358,12 +387,35 @@ export default function App() {
     );
   }, []);
 
+  // Правка записи базы веществ — действует во всех источниках сразу.
+  // Выбор ПДК снимает предупреждение о разных значениях из старого файла.
+  const handleProjectSubstanceChange = useCallback((code, field, value) => {
+    setProjectSubstances((prev) =>
+      prev.map((s) => {
+        if (String(s.code) !== code) return s;
+        const next = { ...s, [field]: value };
+        if (field === "pdk_mr") delete next.pdk_variants;
+        return next;
+      })
+    );
+  }, []);
+
+  const handleProjectSubstanceAdd = useCallback((code) => {
+    setProjectSubstances((prev) =>
+      prev.some((s) => String(s.code) === String(code)) ? prev : [...prev, entryForCode(code, allSubstances)]
+    );
+  }, [allSubstances]);
+
+  const handleProjectSubstanceRemove = useCallback((code) => {
+    setProjectSubstances((prev) => prev.filter((s) => String(s.code) !== code));
+  }, []);
+
   const handleAddEmission = useCallback((srcIdx) => {
     setSources((prev) =>
       prev.map((src, i) => {
         if (i !== srcIdx) return src;
         const ems = Array.isArray(src.emissions) ? [...src.emissions] : [];
-        ems.push({ substance: null, emission_gs: null, emission_ty: null, pdk: 0.5 });
+        ems.push({ substance: null, emission_gs: null, emission_ty: null, pdk: null });
         return { ...src, emissions: ems };
       })
     );
@@ -532,7 +584,10 @@ export default function App() {
   // был самодостаточным: на другой машине справочник может не знать
   // добавленных вручную веществ.
   const handleSaveProject = () => {
-    const project = { sources, meteo, grid, selectedSubstance, enterprise, customSubstances };
+    const project = {
+      sources: resolvedSources, meteo, grid, selectedSubstance, enterprise,
+      projectSubstances, customSubstances,
+    };
     const blob = new Blob([JSON.stringify(project, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -555,6 +610,8 @@ export default function App() {
         try {
           const project = JSON.parse(ev.target.result);
           if (project.sources) setSources(project.sources.map(migrateSource));
+          // Старые файлы без базы: она соберётся из выбросов (collectMissing).
+          setProjectSubstances(Array.isArray(project.projectSubstances) ? project.projectSubstances : []);
           if (project.meteo) setMeteo(project.meteo);
           if (project.grid) setGrid(project.grid);
           if (project.selectedSubstance) setSelectedSubstance(project.selectedSubstance);
@@ -595,6 +652,7 @@ export default function App() {
     setMeteo(DEFAULT_METEO);
     setGrid(DEFAULT_GRID);
     setSelectedSubstance(null);
+    setProjectSubstances([]);
     setEnterprise(DEFAULT_ENTERPRISE);
     setResult(null);
     setTables(null);
@@ -608,10 +666,10 @@ export default function App() {
   const handleGenerateTables = async () => {
     setTablesLoading(true);
     try {
-      const pdk = Math.min(...sources.map(s => s.pdk ?? 0.5));
+      const pdk = minPdk(resolvedSources);
       const payload = {
-        sources: toBackendSources(sources), meteo, grid, pdk,
-        substance: sources[0]?.substance || selectedSubstance,
+        sources: toBackendSources(resolvedSources), meteo, grid, pdk,
+        substance: resolvedSources[0]?.emissions?.[0]?.substance || selectedSubstance,
         enterprise,
       };
       const res = await fetchTables(payload);
@@ -625,15 +683,20 @@ export default function App() {
 
   // Расчёт
   const handleCalculate = async () => {
+    // Без ПДК бэкенд молча подставил бы 0,5 — не считаем, пока база не заполнена.
+    const noPdk = missingPdkCodes(sources, projectSubstanceMap);
+    if (noPdk.length > 0) {
+      setError(`${t.projectSubstancesNoPdk}: ${noPdk.join(", ")}`);
+      setShowProjectSubstances(true);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
-      // Минимальный ПДК среди всех выбросов всех источников (для совместимости со старым API)
-      const allPdks = sources.flatMap(s => (s.emissions || []).map(e => e.pdk ?? 0.5));
-      const pdk = allPdks.length ? Math.min(...allPdks) : 0.5;
+      const pdk = minPdk(resolvedSources);
       // Площадные источники разворачиваются в сетку точечных подысточников
       // на бэкенде (ОНД-86, суперпозиция). Передаём тип и геометрию как есть.
-      const payload = { sources: toBackendSources(sources), meteo, grid, pdk };
+      const payload = { sources: toBackendSources(resolvedSources), meteo, grid, pdk };
       const res = await calculate(payload);
       // Замораживаем в результате вещество главного (худшего) расчёта.
       // by_substance теперь содержит результаты по всем веществам отдельно.
@@ -664,11 +727,11 @@ export default function App() {
     }
     setExporting(true);
     try {
-      const pdk = Math.min(...sources.map(s => s.pdk ?? 0.5));
+      const pdk = minPdk(resolvedSources);
       // Передаём уже готовые результаты — бэкенд пропустит пересчёт.
       await exportPdf({
-        sources, meteo, grid, pdk,
-        substance: sources[0]?.substance || selectedSubstance,
+        sources: resolvedSources, meteo, grid, pdk,
+        substance: resolvedSources[0]?.emissions?.[0]?.substance || selectedSubstance,
         enterprise,
         precomputed_result: result,
       });
@@ -691,10 +754,10 @@ export default function App() {
     setExportingPng(true);
     setError(null);
     try {
-      const pdk = Math.min(...sources.map(s => s.pdk ?? 0.5));
+      const pdk = minPdk(resolvedSources);
       await exportMapPng({
-        sources, meteo, grid, pdk,
-        substance: sources[0]?.substance || selectedSubstance,
+        sources: resolvedSources, meteo, grid, pdk,
+        substance: resolvedSources[0]?.emissions?.[0]?.substance || selectedSubstance,
         enterprise,
         precomputed_result: result,
       });
@@ -714,7 +777,7 @@ export default function App() {
     setError(null);
     try {
       await exportRadugaDocx({
-        sources: toBackendSources(sources), meteo, grid, enterprise,
+        sources: toBackendSources(resolvedSources), meteo, grid, enterprise,
         precomputed_result: result,
       });
     } catch (e) {
@@ -729,8 +792,8 @@ export default function App() {
   const handleExportExcel = async () => {
     setExportingExcel(true);
     try {
-      const pdk = Math.min(...sources.map(s => s.pdk ?? 0.5));
-      await exportExcel({ sources, meteo, grid, pdk, substance: sources[0]?.substance || selectedSubstance, enterprise });
+      const pdk = minPdk(resolvedSources);
+      await exportExcel({ sources: resolvedSources, meteo, grid, pdk, substance: resolvedSources[0]?.emissions?.[0]?.substance || selectedSubstance, enterprise });
     } catch (e) {
       setError("Ошибка генерации Excel.");
     } finally {
@@ -765,6 +828,13 @@ export default function App() {
             </button>
             <button
               className="btn-editor"
+              onClick={() => setShowProjectSubstances(true)}
+              title={t.projectSubstancesTitle}
+            >
+              {t.projectSubstances}
+            </button>
+            <button
+              className="btn-editor"
               onClick={() => setShowBoundaryEditor(true)}
               title={t.enterpriseBoundary}
               style={boundaryPointCount ? { background: "#ECFDF5", borderColor: "#A7F3D0" } : undefined}
@@ -789,79 +859,6 @@ export default function App() {
         </div>
 
         <div className="sidebar-scroll">
-          {/* ---- Вещество и ПДК (общее для всех источников) ---- */}
-          <div className="panel-section">
-            <h3 className="section-title">{t.substance}</h3>
-            <div className="field-row">
-              <label>{t.selectSubstance}</label>
-              <select
-                value={selectedSubstance?.code || ""}
-                onChange={(e) => {
-                  const code = e.target.value;
-                  if (code === "") { setSelectedSubstance(null); return; }
-                  const found = allSubstances.find((s) => s.code === code);
-                  if (found) {
-                    setSelectedSubstance(found);
-                    // Применяем выбранное вещество к ПЕРВОМУ выбросу каждого источника,
-                    // если у того ещё не задано вещество. Не трогаем уже настроенные.
-                    if (found.pdk_mr != null) {
-                      setSources(prev => prev.map(s => {
-                        const ems = Array.isArray(s.emissions) && s.emissions.length > 0
-                          ? [...s.emissions]
-                          : [{ substance: null, emission_gs: null, emission_ty: null, pdk: 0.5 }];
-                        // Если у первого выброса нет вещества — заполняем дефолтом
-                        if (!ems[0].substance) {
-                          ems[0] = { ...ems[0], substance: found, pdk: found.pdk_mr };
-                        }
-                        return { ...s, emissions: ems };
-                      }));
-                    }
-                  }
-                }}
-                style={{ fontSize: 12 }}
-              >
-                <option value="">-- {t.selectSubstance} --</option>
-                {/* Вещество из загруженного проекта, которого нет в справочнике */}
-                {selectedSubstance?.code && !allSubstances.some((s) => String(s.code) === String(selectedSubstance.code)) && (
-                  <option value={selectedSubstance.code}>
-                    {selectedSubstance.code} — {selectedSubstance.name} (ПДК: {selectedSubstance.pdk_mr ?? "—"})
-                  </option>
-                )}
-                {allSubstances.map((s) => (
-                  <option key={s.code} value={s.code}>
-                    {s.code} — {s.name} (ПДК: {s.pdk_mr ?? "—"})
-                  </option>
-                ))}
-              </select>
-            </div>
-            {selectedSubstance && (
-              <div style={{ fontSize: 11, color: "#64748b", padding: "2px 0 0 4px" }}>
-                {t.hazardClass}: {selectedSubstance.hazard_class ?? "—"} | {t.pdkSs}: {selectedSubstance.pdk_ss ?? "—"}
-              </div>
-            )}
-            <div className="field-row">
-              <label>{t.pdkMr}</label>
-              <input
-                type="number"
-                step="0.01"
-                min="0"
-                value={selectedSubstance?.pdk_mr ?? 0.5}
-                onChange={(e) => {
-                  const val = parseFloat(e.target.value) || 0.5;
-                  setSelectedSubstance(prev => prev ? { ...prev, pdk_mr: val } : { code: "", name: "", pdk_mr: val });
-                  // Применяем ПДК к первому выбросу каждого источника
-                  setSources(prev => prev.map(s => {
-                    const ems = Array.isArray(s.emissions) && s.emissions.length > 0
-                      ? [...s.emissions]
-                      : [{ substance: null, emission_gs: null, emission_ty: null, pdk: 0.5 }];
-                    ems[0] = { ...ems[0], pdk: val };
-                    return { ...s, emissions: ems };
-                  }));
-                }}
-              />
-            </div>
-          </div>
-
           {/* ---- Источники ---- */}
           <div className="panel-section">
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 4 }}>
@@ -925,6 +922,7 @@ export default function App() {
                     onRemove={handleRemoveSource}
                     onPickFromMap={handlePickFromMap}
                     substances={allSubstances}
+                    projectSubstanceMap={projectSubstanceMap}
                     onAddCustomSubstance={handleAddCustomSubstance}
                     defaultCollapsed={sources.length > COLLAPSE_THRESHOLD}
                     t={t}
@@ -1029,17 +1027,18 @@ export default function App() {
                   const emissions = rows.map((row) => {
                     let sub = findSubstance(row.substance_code, row.substance_name);
                     if (!sub) {
-                      // Не нашли в справочнике — сохраняем как есть, ПДК надо проверить
+                      // Не нашли в справочнике — попадёт в базу проекта без ПДК,
+                      // расчёт попросит его заполнить.
                       unknownSubstances.add(row.substance_name || row.substance_code || "без названия");
                       sub = (row.substance_name || row.substance_code)
-                        ? { code: row.substance_code || "", name: row.substance_name || row.substance_code, pdk_mr: 0.5 }
+                        ? { code: row.substance_code || row.substance_name, name: row.substance_name || row.substance_code }
                         : null;
                     }
                     return {
                       substance: sub,
                       emission_gs: row.emission_gs ?? null,
                       emission_ty: row.emission_ty ?? null,
-                      pdk: sub?.pdk_mr ?? 0.5,
+                      pdk: null,
                     };
                   });
 
@@ -1288,6 +1287,20 @@ export default function App() {
           substances={allSubstances}
           onSubstancesChanged={reloadSubstances}
           onClose={() => setShowSubstanceEditor(false)}
+          t={t}
+        />
+      )}
+
+      {/* ===== Вещества проекта: ПДК/класс сразу для всех источников ===== */}
+      {showProjectSubstances && (
+        <ProjectSubstances
+          db={projectSubstances}
+          sources={sources}
+          reference={allSubstances}
+          onAdd={handleProjectSubstanceAdd}
+          onRemove={handleProjectSubstanceRemove}
+          onChange={handleProjectSubstanceChange}
+          onClose={() => setShowProjectSubstances(false)}
           t={t}
         />
       )}
