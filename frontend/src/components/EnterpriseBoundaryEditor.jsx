@@ -9,7 +9,7 @@ import { useState, useRef } from "react";
  *  - boundaries: массив контуров [ [{lat,lon}...], ... ]
  *  - activeIdx: индекс активного объекта
  *  - onActiveIdxChange(idx)
- *  - maxObjects: максимум объектов (по умолчанию 5)
+ *  - maxObjects: максимум объектов (по умолчанию 8)
  *  - onChange(newBoundaries)  — отдаёт весь массив контуров
  *  - picking: bool — режим клика на карте активен
  *  - onTogglePicking(), onFitMap(), onAfterImport(count), onClose()
@@ -63,7 +63,7 @@ function parseImportText(text) {
 }
 
 export default function EnterpriseBoundaryEditor({
-  boundaries, activeIdx, onActiveIdxChange, maxObjects = 5,
+  boundaries, activeIdx, onActiveIdxChange, maxObjects = 8,
   onChange, picking, onTogglePicking, onFitMap, onAfterImport, onClose, t,
 }) {
   const [importText, setImportText] = useState("");

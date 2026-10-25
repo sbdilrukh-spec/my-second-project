@@ -10,7 +10,7 @@ const DEFAULT_ENTERPRISE = {
   client: "",
   developer: "",
   boundary: [], // массив точек [{lat, lon}, ...] первого контура (обратная совместимость)
-  boundaries: [], // массив контуров-объектов [[{lat,lon}...], ...], до 5
+  boundaries: [], // массив контуров-объектов [[{lat,lon}...], ...], до 8
 };
 
 export default function EnterpriseCard({ enterprise, onChange, t }) {

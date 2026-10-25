@@ -573,7 +573,7 @@ export default function MapView({
   const fileInputRef = useRef(null);
   const defaultCenter = cityCenter || [41.2995, 69.2401];
 
-  // Контуры предприятия: несколько объектов (до 5) или один старый boundary.
+  // Контуры предприятия: несколько объектов (до 8) или один старый boundary.
   const entBoundaries = (enterprise?.boundaries && enterprise.boundaries.length)
     ? enterprise.boundaries
     : (enterprise?.boundary?.length ? [enterprise.boundary] : []);
