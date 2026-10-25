@@ -559,6 +559,13 @@ export default function App() {
           if (project.grid) setGrid(project.grid);
           if (project.selectedSubstance) setSelectedSubstance(project.selectedSubstance);
           if (project.enterprise) setEnterprise(migrateEnterprise(project.enterprise));
+          // Результат прошлого проекта к новому не относится — иначе на карте
+          // остаётся чужое поле до следующего «Рассчитать».
+          setResult(null);
+          setTables(null);
+          setBaselineResult(null);
+          setDisplaySubstanceCode(null);
+          setError(null);
           // Вещества, сохранённые вместе с проектом, добавляем в пользовательский
           // справочник (без дублей по коду).
           if (Array.isArray(project.customSubstances) && project.customSubstances.length > 0) {
