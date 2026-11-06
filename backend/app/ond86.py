@@ -569,6 +569,21 @@ class _SubstanceSourceProxy:
         return self._emission_gs
 
 
+def apply_background(c, cf: float, mode: str = "existing"):
+    """
+    Суммарная концентрация с фоном, мг/м³ (ОНД-86, раздел 7).
+    mode="existing" — действующее предприятие, его вклад уже сидит в фоне
+    станции: сф' = сф·(1 − 0,4·c/сф) при c ≤ 2сф, иначе сф' = 0,2·сф.
+    mode="new" — новый объект: c + сф.
+    """
+    c = np.asarray(c, dtype=float)
+    if not cf or cf <= 0:
+        return c
+    if mode == "new":
+        return c + cf
+    return np.where(c <= 2.0 * cf, c + cf * (1.0 - 0.4 * c / cf), c + 0.2 * cf)
+
+
 def compute_per_substance(sources, meteo, city_data, **grid_kwargs):
     """
     Отдельный расчёт на каждое вещество. Возвращает:
@@ -603,8 +618,11 @@ def compute_per_substance(sources, meteo, city_data, **grid_kwargs):
                 group["pdk"] = current_pdk
 
     def build_top_n(proxies, lats_arr, lons_arr, total_mg_arr, dir_arr, u_arr,
-                    pdk_value, top_n=10):
-        """Top-N точек по убыванию концентрации с вкладами источников (Таблица 13)."""
+                    pdk_value, top_n=10, bg_arr=None):
+        """
+        Top-N точек по убыванию концентрации с вкладами источников (Таблица 13).
+        bg_arr — учтённый фон сф' в каждой точке; идёт первым «вкладом» «Фон».
+        """
         if len(total_mg_arr) == 0:
             return []
         n = min(top_n, len(total_mg_arr))
@@ -630,6 +648,12 @@ def compute_per_substance(sources, meteo, city_data, **grid_kwargs):
                 [(p, float(vals[k])) for p, vals in contribs if vals[k] > 0],
                 key=lambda pv: -pv[1],
             )
+            bg = float(bg_arr[i]) if bg_arr is not None else 0.0
+            bg_item = [{
+                "src_index": -1, "number": "Фон", "name": "Фон",
+                "contribution_mg": round(bg, 9),
+                "contribution_pdk": round(bg / pdk_value if pdk_value > 0 else 0.0, 9),
+            }] if bg > 0 else []
             result.append({
                 "qh": (c_mg / pdk_value) if pdk_value > 0 else 0.0,
                 "c_mg": c_mg,
@@ -639,7 +663,8 @@ def compute_per_substance(sources, meteo, city_data, **grid_kwargs):
                 "lon": float(lons_arr[i]),
                 "wind_dir_deg": angle if angle >= 0 else None,
                 "wind_speed_ms": float(u_arr[i]),
-                "contributions": [
+                "background_mg": bg if bg > 0 else None,
+                "contributions": bg_item + [
                     {
                         "src_index": p["index"],
                         "number": p["src"].number,
@@ -652,15 +677,24 @@ def compute_per_substance(sources, meteo, city_data, **grid_kwargs):
             })
         return result
 
-    def substance_result(proxies, sub_dict, pdk_value):
-        lats, lons, total_mg, src_results, dir_at_max, u_at_max = compute_grid(
+    bg_mode = getattr(meteo, "background_mode", None) or "existing"
+
+    def substance_result(proxies, sub_dict, pdk_value, cf=0.0):
+        lats, lons, c0, src_results, dir_at_max, u_at_max = compute_grid(
             sources=proxies, meteo=meteo, city_data=city_data, **grid_kwargs,
         )
+        # Фон добавляется монотонно — положение максимума и порядок точек
+        # не меняются; поле без фона остаётся в points[].c0 для сравнения.
+        has_bg = bool(cf and cf > 0)
+        total_mg = apply_background(c0, cf, bg_mode) if has_bg else c0
         max_idx = int(total_mg.argmax()) if len(total_mg) else 0
         max_c = float(total_mg[max_idx]) if len(total_mg) else 0.0
         return lats, lons, {
             "substance": sub_dict,
             "pdk": pdk_value,
+            "background": float(cf) if has_bg else None,
+            "background_mode": bg_mode if has_bg else None,
+            "max_c0": float(c0[max_idx]) if has_bg and len(c0) else None,
             "max_c": max_c,
             "max_lat": float(lats[max_idx]) if len(lats) else 0.0,
             "max_lon": float(lons[max_idx]) if len(lons) else 0.0,
@@ -669,11 +703,13 @@ def compute_per_substance(sources, meteo, city_data, **grid_kwargs):
             "source_results": src_results,
             "points": [
                 {"lat": float(lats[i]), "lon": float(lons[i]), "c": float(total_mg[i]),
+                 "c0": float(c0[i]) if has_bg else None,
                  "d": int(dir_at_max[i]), "u": float(u_at_max[i])}
                 for i in range(len(lats))
             ],
             "top_points": build_top_n(proxies, lats, lons, total_mg, dir_at_max,
-                                      u_at_max, pdk_value),
+                                      u_at_max, pdk_value,
+                                      bg_arr=(total_mg - c0) if has_bg else None),
         }
 
     # Ничего не задано — один общий расчёт по суммарному выбросу (старое поведение)
@@ -702,7 +738,8 @@ def compute_per_substance(sources, meteo, city_data, **grid_kwargs):
                 "F": F,
             }
         pdk_value = float(group["pdk"]) if group["pdk"] else 0.5
-        lats, lons, data = substance_result(proxies, sub_dict, pdk_value)
+        cf = getattr(sub_meta, "background", None) if sub_meta is not None else None
+        lats, lons, data = substance_result(proxies, sub_dict, pdk_value, float(cf or 0.0))
         if common_lats is None:
             common_lats, common_lons = lats, lons
         by_substance[code] = data

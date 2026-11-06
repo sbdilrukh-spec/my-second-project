@@ -116,12 +116,13 @@ export default function ProjectSubstances({ db, sources, reference, onAdd, onRem
                 <th style={{ width: 100 }}>{t.pdkSs}</th>
                 <th style={{ width: 60 }}>{t.hazardClass}</th>
                 <th style={{ width: 60 }}>F</th>
+                <th style={{ width: 90 }} title={t.backgroundColHint}>{t.backgroundCol}</th>
                 <th style={{ width: 36 }}></th>
               </tr>
             </thead>
             <tbody>
               {rows.length === 0 && (
-                <tr><td colSpan={9} style={{ textAlign: "center", color: "#94A3B8" }}>{t.projectSubstancesEmpty}</td></tr>
+                <tr><td colSpan={10} style={{ textAlign: "center", color: "#94A3B8" }}>{t.projectSubstancesEmpty}</td></tr>
               )}
               {rows.map((r) => {
                 const code = String(r.code);
@@ -165,6 +166,14 @@ export default function ProjectSubstances({ db, sources, reference, onAdd, onRem
                     </td>
                     <td>
                       <CommitInput value={r.F} width={50} onCommit={(v) => onChange(code, "F", v)} />
+                    </td>
+                    <td>
+                      <CommitInput value={r.background} width={70} onCommit={(v) => onChange(code, "background", v)} />
+                      {Number(r.background) > 0 && Number(r.pdk_mr) > 0 && (
+                        <div style={{ fontSize: 10, color: "#64748B" }}>
+                          {(r.background / r.pdk_mr).toFixed(2)} ПДК
+                        </div>
+                      )}
                     </td>
                     <td>
                       {!u && (

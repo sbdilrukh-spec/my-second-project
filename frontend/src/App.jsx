@@ -145,6 +145,9 @@ export default function App() {
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState(null);
   const [viewMode, setViewMode] = useState("heatmap");
+  // Карта: поле с фоном (по умолчанию) или без — для сравнения
+  const [showBackground, setShowBackground] = useState(true);
+  const toggleBackground = useCallback(() => setShowBackground((v) => !v), []);
 
   // Поиск и порционный вывод карточек: при сотнях источников рендерить все
   // карточки сразу нельзя — DOM разрастается и интерфейс замирает.
@@ -297,21 +300,26 @@ export default function App() {
       const code = displaySubstanceCode || result.primary_code;
       const sub = result.by_substance.find(s => s.code === code) || result.by_substance[0];
       if (sub) {
+        // «Без фона» — только просмотр: поле c0 из того же расчёта.
+        // Экспорты берут result целиком и всегда идут с фоном.
+        const noBg = sub.background && !showBackground;
+        const maxC = noBg ? (sub.max_c0 ?? sub.max_c) : sub.max_c;
         return {
           ...result,
-          points: sub.points,
-          max_c: sub.max_c,
+          points: noBg ? sub.points.map((p) => ({ ...p, c: p.c0 ?? p.c })) : sub.points,
+          background: sub.background || null,
+          max_c: maxC,
           max_lat: sub.max_lat,
           max_lon: sub.max_lon,
           source_results: sub.source_results,
-          exceeds_pdk: sub.exceeds_pdk,
+          exceeds_pdk: noBg ? maxC > sub.pdk : sub.exceeds_pdk,
           pdk: sub.pdk,
           _substance: { code: sub.code, name: sub.name, pdk_mr: sub.pdk, hazard_class: sub.hazard_class },
         };
       }
     }
     return result;
-  }, [result, displaySubstanceCode]);
+  }, [result, displaySubstanceCode, showBackground]);
 
   // Центроид всех контуров предприятия (по всем точкам) — null если пусто
   const enterpriseCentroid = (() => {
@@ -1278,6 +1286,8 @@ export default function App() {
           enterprise={enterprise}
           substance={displayedResult?._substance || sources[0]?.emissions?.[0]?.substance || selectedSubstance}
           fitMapTrigger={fitMapTrigger}
+          showBackground={showBackground}
+          onToggleBackground={toggleBackground}
         />
       </main>
 

@@ -107,6 +107,19 @@ export default function MeteoPanel({ meteo, cities, onChange, onLoadWeather, wea
           onChange={(e) => set("temperature", parseFloat(e.target.value) || 0)}
         />
       </div>
+
+      {/* Как складывать фон (задаётся по веществам в базе веществ проекта) */}
+      <div className="field-row">
+        <label title={t.backgroundModeHint}>{t.backgroundMode}</label>
+        <select
+          value={meteo.background_mode || "existing"}
+          onChange={(e) => set("background_mode", e.target.value)}
+          title={t.backgroundModeHint}
+        >
+          <option value="existing">{t.backgroundExisting}</option>
+          <option value="new">{t.backgroundNew}</option>
+        </select>
+      </div>
     </div>
   );
 }

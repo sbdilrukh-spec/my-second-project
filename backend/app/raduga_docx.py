@@ -199,7 +199,7 @@ _T12_LEGEND = [
 ]
 
 
-def _table12_pages(obj, sub_name, grid):
+def _table12_pages(obj, sub_name, grid, with_bg=False):
     """
     grid: {(x, y): (qh, hb, u)} → страницы: по T12_COLS точек по X и по
     T12_ROWS строк Y на страницу (иначе блок не помещается на лист A4).
@@ -216,7 +216,10 @@ def _table12_pages(obj, sub_name, grid):
         chunk = xs[xs_start:xs_start + T12_COLS]
         for ys_start in range(0, len(ys), rows_per_page):
             page_no += 1
-            lines = list(_T12_LEGEND) + [
+            legend = list(_T12_LEGEND)
+            if with_bg:
+                legend[4] = legend[4].replace("Без фона", "С учетом фона")
+            lines = legend + [
                 f"Объект:    {obj}",
                 f"           вещество: {sub_name}".ljust(95) + f"Таблица 12 Cтраница {page_no:2d}",
                 SEP_T12,
@@ -355,7 +358,7 @@ def build_tables(request_data: dict, result_data: dict, coef_a: float) -> list:
             x, y = gxy.node(p["lat"], p["lon"])
             cells[(x, y)] = (_f(p.get("c")) / pdk, _hb(p.get("d")), _f(p.get("u")))
         cells_by_sub.append((sub, name, cells))
-        pages += _table12_pages(obj, name, cells)
+        pages += _table12_pages(obj, name, cells, with_bg=bool(sub.get("background")))
 
     for sub, name, cells in cells_by_sub:
         qhs = [v[0] for v in cells.values()]

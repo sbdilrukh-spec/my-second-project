@@ -466,7 +466,7 @@ const SourceMarker = React.memo(function SourceMarker({ src, i, onSourceMove }) 
 });
 
 // ─── Кнопки переключения режима ───────────────────────────────────────────────
-function ViewToggle({ mode, onChange }) {
+function ViewToggle({ mode, onChange, hasBackground, showBackground, onToggleBackground }) {
   const btnBase = {
     padding: "6px 12px", borderRadius: 6, border: "2px solid #2563EB",
     cursor: "pointer", fontSize: 12, fontWeight: 600,
@@ -490,6 +490,15 @@ function ViewToggle({ mode, onChange }) {
       >
         ⊞ Сетка ОНД
       </button>
+      {hasBackground && (
+        <button
+          style={{ ...btnBase, background: showBackground ? "#059669" : "#fff", color: showBackground ? "#fff" : "#059669", borderColor: "#059669" }}
+          onClick={onToggleBackground}
+          title="Показывать поле с учётом фоновой концентрации или без неё (экспорт всегда с фоном)"
+        >
+          {showBackground ? "С фоном" : "Без фона"}
+        </button>
+      )}
     </div>
   );
 }
@@ -566,6 +575,7 @@ export default function MapView({
   sourceOffsetX, sourceOffsetY, currentPdk,
   meteo, enterprise, substance,
   fitMapTrigger,
+  showBackground, onToggleBackground,
 }) {
   const [mapType, setMapType] = useState("satellite");
   const [bgImage, setBgImage] = useState(null);
@@ -706,7 +716,15 @@ export default function MapView({
       )}
 
       {/* Кнопки переключения */}
-      {result && <ViewToggle mode={viewMode} onChange={onViewModeChange} />}
+      {result && (
+        <ViewToggle
+          mode={viewMode}
+          onChange={onViewModeChange}
+          hasBackground={!!result.background}
+          showBackground={showBackground}
+          onToggleBackground={onToggleBackground}
+        />
+      )}
 
       {/* Роза ветров */}
       {result && meteo && (

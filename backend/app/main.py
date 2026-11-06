@@ -473,6 +473,7 @@ def calculate(req: CalculationRequest):
                 wind_dir_deg=tp.get("wind_dir_deg"),
                 wind_speed_ms=tp["wind_speed_ms"],
                 contributions=[TopPointContribution(**c) for c in tp["contributions"]],
+                background_mg=_sig(tp["background_mg"]) if tp.get("background_mg") else None,
             )
             for tp in top_pts_raw
         ]
@@ -488,11 +489,15 @@ def calculate(req: CalculationRequest):
             ratio_to_pdk=round(data["ratio_to_pdk"], 4),
             points=[
                 GridPoint(lat=p["lat"], lon=p["lon"], c=_sig(p["c"]),
+                          c0=_sig(p["c0"]) if p.get("c0") is not None else None,
                           d=p.get("d"), u=p.get("u"))
                 for p in data["points"]
             ],
             source_results=[SourceResult(**sr) for sr in data["source_results"]],
             top_points=top_pts,
+            background=data.get("background"),
+            background_mode=data.get("background_mode"),
+            max_c0=_sig(data["max_c0"]) if data.get("max_c0") is not None else None,
         ))
 
     # Главное (худшее) вещество — поля для обратной совместимости

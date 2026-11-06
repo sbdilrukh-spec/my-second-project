@@ -9,6 +9,7 @@ class SubstanceInput(BaseModel):
     pdk_ss: Optional[float] = None
     hazard_class: Optional[int] = None
     F: Optional[float] = None   # коэффициент оседания (1 — газы, 2–3 — пыль)
+    background: Optional[float] = None   # фоновая концентрация, мг/м³ (справка гидромета)
 
 
 class EmissionEntry(BaseModel):
@@ -99,6 +100,9 @@ class MeteoInput(BaseModel):
     stability_class: str     # A, B, C, D, E, F
     temperature: float       # Температура воздуха, °C
     wind_mode: str = "360"   # "360" — все направления (36 шагов), "single" — одно направление
+    # Учёт фона: "existing" — действующее предприятие, его вклад уже в фоне
+    # (ОНД-86 п.7, сф' с поправкой); "new" — новый объект, c + сф
+    background_mode: str = "existing"
 
 
 class GridInput(BaseModel):
@@ -155,7 +159,8 @@ class CalculationRequest(BaseModel):
 class GridPoint(BaseModel):
     lat: float
     lon: float
-    c: float      # концентрация, мг/м³
+    c: float      # концентрация, мг/м³ (с фоном, если он задан)
+    c0: Optional[float] = None  # без фона — только когда фон задан
     d: Optional[int] = None     # опасное направление ветра, ° (HB)
     u: Optional[float] = None   # опасная скорость ветра, м/с (U)
 
@@ -202,6 +207,7 @@ class TopPoint(BaseModel):
     wind_dir_deg: Optional[int] = None  # HB — направление ветра, при котором достигнут максимум
     wind_speed_ms: float                # U — скорость ветра, м/с
     contributions: List[TopPointContribution]
+    background_mg: Optional[float] = None   # учтённый фон сф' в точке, мг/м³
 
 
 class SubstanceResult(BaseModel):
@@ -218,6 +224,9 @@ class SubstanceResult(BaseModel):
     source_results: List[SourceResult]
     hazard_class: Optional[int] = None
     top_points: Optional[List[TopPoint]] = None
+    background: Optional[float] = None      # фон сф, мг/м³ (None — без фона)
+    background_mode: Optional[str] = None
+    max_c0: Optional[float] = None          # максимум без фона
 
 
 class CalculationResponse(BaseModel):

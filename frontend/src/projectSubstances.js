@@ -4,7 +4,7 @@
 // экспортом и сохранением. Копии внутри выбросов остаются лишь для
 // совместимости со старыми файлами и бэкендом.
 
-const FIELDS = ["code", "name", "pdk_mr", "pdk_ss", "hazard_class", "F"];
+const FIELDS = ["code", "name", "pdk_mr", "pdk_ss", "hazard_class", "F", "background"];
 
 export function substanceKey(sub) {
   return sub && sub.code != null && sub.code !== "" ? String(sub.code) : null;
