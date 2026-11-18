@@ -11,6 +11,7 @@ export default function ResultsPanel({
   onExportMapPng, exportingPng,
   onExportExcel, exportingExcel,
   onExportDocx, exportingDocx,
+  onExportExcelMaps, exportingExcelMaps,
   t,
 }) {
   if (!result) {
@@ -130,6 +131,18 @@ export default function ResultsPanel({
           title="Таблицы 1, 7, 8, 12, 13 в формате распечатки «Радуги» — для вставки в отчёт"
         >
           {exportingDocx ? "Готовим таблицы..." : "📄 Таблицы Радуги (Word)"}
+        </button>
+      )}
+
+      {onExportExcelMaps && (
+        <button
+          className="btn-secondary"
+          style={{ width: "100%", marginTop: 6, fontSize: 12 }}
+          onClick={onExportExcelMaps}
+          disabled={exportingExcelMaps}
+          title="Сетка ОНД по каждому веществу в Excel: доли ПДК, ячейки закрашены как на карте — для переноса в CorelDRAW"
+        >
+          {exportingExcelMaps ? "Готовим карты..." : "▦ Карты рассеивания (Excel)"}
         </button>
       )}
 

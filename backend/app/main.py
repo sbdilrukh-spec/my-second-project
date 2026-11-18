@@ -902,6 +902,32 @@ def export_raduga_docx(req: CalculationRequest):
 
 
 # ---------------------------------------------------------------------------
+# POST /api/export/excel-maps  — карты рассеивания в Excel (лист на вещество,
+# закрашенная сетка в долях ПДК — для переноса в CorelDRAW)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/export/excel-maps")
+def export_excel_maps(req: CalculationRequest):
+    from .excel_maps import generate_excel_maps
+
+    if not req.sources:
+        raise HTTPException(status_code=400, detail="Необходимо указать хотя бы один источник")
+    res = req.precomputed_result if isinstance(req.precomputed_result, dict) else None
+    if not ((res or {}).get("by_substance") or []):
+        res = calculate(req).model_dump()
+    request_data = req.model_dump(exclude={"precomputed_result", "map_snapshot", "map_snapshots"})
+    try:
+        data = generate_excel_maps(request_data, res)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=karty_rasseivaniya.xlsx"},
+    )
+
+
+# ---------------------------------------------------------------------------
 # GET /api/health  — health check (для облачных пробок Render/Railway)
 # ---------------------------------------------------------------------------
 

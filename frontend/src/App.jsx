@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { fetchCities, fetchSubstances, fetchWeather, calculate, fetchTables, exportPdf, exportMapPng, exportExcel, exportRadugaDocx } from "./api.js";
+import { fetchCities, fetchSubstances, fetchWeather, calculate, fetchTables, exportPdf, exportMapPng, exportExcel, exportRadugaDocx, exportExcelMaps } from "./api.js";
 import { translations } from "./i18n.js";
 import SourceForm, { createDefaultSource, migrateSource } from "./components/SourceForm.jsx";
 import { sourceNumber } from "./sourceNumber.js";
@@ -795,6 +795,27 @@ export default function App() {
     }
   };
 
+  // Карты рассеивания в Excel (закрашенная сетка ОНД по веществам)
+  const [exportingExcelMaps, setExportingExcelMaps] = useState(false);
+  const handleExportExcelMaps = async () => {
+    if (!result) {
+      setError("Сначала нажмите «Рассчитать», потом «Карты в Excel».");
+      return;
+    }
+    setExportingExcelMaps(true);
+    setError(null);
+    try {
+      await exportExcelMaps({
+        sources: toBackendSources(resolvedSources), meteo, grid, enterprise,
+        precomputed_result: result,
+      });
+    } catch (e) {
+      setError(`Ошибка формирования карт Excel: ${e?.message || "неизвестная ошибка"}`);
+    } finally {
+      setExportingExcelMaps(false);
+    }
+  };
+
   // Экспорт Excel
   const [exportingExcel, setExportingExcel] = useState(false);
   const handleExportExcel = async () => {
@@ -1229,6 +1250,8 @@ export default function App() {
             exportingPng={exportingPng}
             onExportExcel={handleExportExcel}
             exportingExcel={exportingExcel}
+            onExportExcelMaps={handleExportExcelMaps}
+            exportingExcelMaps={exportingExcelMaps}
             onExportDocx={handleExportDocx}
             exportingDocx={exportingDocx}
             t={t}

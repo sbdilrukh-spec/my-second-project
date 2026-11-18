@@ -152,6 +152,30 @@ export async function exportRadugaDocx(payload) {
   }
 }
 
+// Карты рассеивания в Excel: лист на вещество, закрашенная сетка ОНД (для CorelDRAW).
+export async function exportExcelMaps(payload) {
+  try {
+    const res = await axios.post(`${BASE}/export/excel-maps`, payload, { responseType: "blob" });
+    const url = window.URL.createObjectURL(new Blob([res.data], {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "karty-rasseivaniya.xlsx";
+    a.click();
+    window.URL.revokeObjectURL(url);
+  } catch (err) {
+    let detail = "";
+    if (err.response?.data instanceof Blob) {
+      try {
+        const text = await err.response.data.text();
+        try { detail = JSON.parse(text).detail || text; } catch { detail = text; }
+      } catch { /* ignore */ }
+    }
+    throw new Error(detail || (err.response?.status ? `сервер вернул ${err.response.status}` : "нет ответа от сервера"));
+  }
+}
+
 export async function exportExcel(payload) {
   const res = await axios.post(`${BASE}/export/excel`, payload, {
     responseType: "blob",
